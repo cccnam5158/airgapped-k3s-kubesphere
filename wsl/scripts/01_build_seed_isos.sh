@@ -714,6 +714,68 @@ copy_additional_files() {
     fi
     chmod 644 "$files_dir/airgap-registry-ca.crt"
     
+    # Airgapped 환경용 패키지 다운로드 및 복사
+    log_info "Airgapped 환경용 패키지들을 다운로드합니다..."
+    local packages_dir="$files_dir/packages"
+    mkdir -p "$packages_dir"
+    
+    # 필요한 패키지 목록
+    local packages=(
+        "jq"
+        "iftop"
+        "iotop"
+        "dstat"
+        "sysstat"
+        "psmisc"
+        "yq"
+        "iproute2"
+        "telnet"
+        "dnsutils"  # dig 명령어 포함
+        "htop"
+        "ethtool"
+    )
+    
+    # 패키지 다운로드
+    for package in "${packages[@]}"; do
+        log_info "패키지 다운로드 중: $package"
+        if apt-get download "$package" -o APT::Get::Download-Only=true -o Dir::Cache="$packages_dir" 2>/dev/null; then
+            log_success "패키지 다운로드 완료: $package"
+        else
+            log_warning "패키지 다운로드 실패: $package (건너뜀)"
+        fi
+    done
+    
+    # 다운로드된 .deb 파일들을 packages 디렉토리로 이동
+    if [[ -d "$packages_dir/archives" ]]; then
+        mv "$packages_dir/archives"/*.deb "$packages_dir/" 2>/dev/null || true
+        rmdir "$packages_dir/archives" 2>/dev/null || true
+    fi
+    
+    # 패키지 설치 스크립트 생성
+    cat > "$packages_dir/install-packages.sh" << 'EOF'
+#!/bin/bash
+# Airgapped 환경에서 패키지 설치 스크립트
+set -euo pipefail
+
+echo "Airgapped 환경에서 추가 패키지들을 설치합니다..."
+
+# 현재 디렉토리의 .deb 파일들을 설치
+for deb_file in *.deb; do
+    if [[ -f "$deb_file" ]]; then
+        echo "설치 중: $deb_file"
+        dpkg -i "$deb_file" || echo "설치 실패: $deb_file (의존성 문제일 수 있음)"
+    fi
+done
+
+# 의존성 문제 해결
+apt-get install -f -y || true
+
+echo "패키지 설치 완료!"
+EOF
+    chmod +x "$packages_dir/install-packages.sh"
+    
+    log_success "Airgapped 환경용 패키지 준비 완료"
+    
     # WSL 기준 빌드 시각 기록 (부팅 시 초기 오프라인 시간 동기화에 사용)
     if command -v date &> /dev/null; then
     # UTC 기준으로만 epoch 생성 (타임존 무관한 절대시간)

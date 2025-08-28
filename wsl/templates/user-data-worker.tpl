@@ -584,6 +584,9 @@ autoinstall:
       # Create kubectl alias (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/kubectl-alias-created ]; then echo 'alias kubectl=\"k3s kubectl\"' >> /home/ubuntu/.bashrc && echo 'Kubectl alias created' > /var/lib/kubectl-alias-created; fi" ]
 
+      # Airgapped 환경에서 추가 패키지 설치 (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/additional-packages-installed ]; then if [ -d /usr/local/seed/packages ]; then cd /usr/local/seed/packages && chmod +x install-packages.sh && ./install-packages.sh; fi && echo 'Additional packages installed' > /var/lib/additional-packages-installed; fi" ]
+
       # SSH 서비스 재시작 (보안 설정 적용, 한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/ssh-restarted ]; then systemctl restart ssh && echo 'SSH restarted' > /var/lib/ssh-restarted; fi" ]
 
