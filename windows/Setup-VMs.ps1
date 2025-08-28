@@ -520,35 +520,75 @@ try {
         
         Write-Info "Disconnecting ISO files to prevent reinstall loop..."
         
-        # Disconnect ISO from master VM
+        # Disconnect ISO from master VM using VMX modification
         Write-Info "Disconnecting ISO from master VM: $MasterName"
         try {
-            & $script:VMRUN_PATH -T ws disconnectDevice $masterVmx "sata0:1" 2>$null
-            if ($masterCopyComplete) {
-                Write-Success "ISO safely disconnected from master VM (copy completed)"
-            } else {
-                Write-Warning "ISO disconnected from master VM (copy may be incomplete)"
-            }
+            # Stop VM first
+            & $script:VMRUN_PATH -T ws stop $masterVmx soft 2>$null
+            Start-Sleep -Seconds 5
+            
+            # Modify VMX to disable CD-ROM
+            $vmxContent = Get-Content -Path $masterVmx -Raw
+            $vmxContent = $vmxContent -replace 'sata0:1\.startConnected = "TRUE"', 'sata0:1.startConnected = "FALSE"'
+            Set-Content -Path $masterVmx -Value $vmxContent -Encoding ASCII
+            
+            Write-Success "ISO safely disconnected from master VM (VMX modified)"
         } catch {
             Write-Warning "Failed to disconnect ISO from master VM: $_"
         }
         
-        # Disconnect ISO from worker VMs
+        # Disconnect ISO from worker VMs using VMX modification
         for ($i=0; $i -lt $workerVmx.Count; $i++) {
             Write-Info "Disconnecting ISO from worker VM: $($WorkerNames[$i])"
             try {
-                & $script:VMRUN_PATH -T ws disconnectDevice $workerVmx[$i] "sata0:1" 2>$null
-                if ($workerCopyComplete[$i]) {
-                    Write-Success "ISO safely disconnected from worker VM: $($WorkerNames[$i]) (copy completed)"
-                } else {
-                    Write-Warning "ISO disconnected from worker VM: $($WorkerNames[$i]) (copy may be incomplete)"
-                }
+                # Stop VM first
+                & $script:VMRUN_PATH -T ws stop $workerVmx[$i] soft 2>$null
+                Start-Sleep -Seconds 5
+                
+                # Modify VMX to disable CD-ROM
+                $vmxContent = Get-Content -Path $workerVmx[$i] -Raw
+                $vmxContent = $vmxContent -replace 'sata0:1\.startConnected = "TRUE"', 'sata0:1.startConnected = "FALSE"'
+                Set-Content -Path $workerVmx[$i] -Value $vmxContent -Encoding ASCII
+                
+                Write-Success "ISO safely disconnected from worker VM: $($WorkerNames[$i]) (VMX modified)"
             } catch {
                 Write-Warning "Failed to disconnect ISO from worker VM $($WorkerNames[$i]): $_"
             }
         }
         
         Write-Success "ISO disconnection completed"
+        
+        # Restart VMs to apply VMX changes
+        Write-Info "Restarting VMs to apply VMX changes..."
+        
+        # Restart master VM
+        Write-Info "Restarting master VM: $MasterName"
+        try {
+            & $script:VMRUN_PATH -T ws start $masterVmx 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Success "Master VM restarted successfully"
+            } else {
+                Write-Warning "Failed to restart master VM, you may need to start it manually"
+            }
+        } catch {
+            Write-Warning "Failed to restart master VM: $_"
+        }
+        
+        # Restart worker VMs
+        for ($i=0; $i -lt $workerVmx.Count; $i++) {
+            Write-Info "Restarting worker VM: $($WorkerNames[$i])"
+            try {
+                & $script:VMRUN_PATH -T ws start $workerVmx[$i] 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Success "Worker VM restarted successfully: $($WorkerNames[$i])"
+                } else {
+                    Write-Warning "Failed to restart worker VM: $($WorkerNames[$i]), you may need to start it manually"
+                }
+            } catch {
+                Write-Warning "Failed to restart worker VM $($WorkerNames[$i]): $_"
+            }
+            Start-Sleep -Seconds 5
+        }
         
     } else {
         Write-Info "VM startup skipped (use -SkipVMStart to skip)"

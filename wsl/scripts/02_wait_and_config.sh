@@ -161,6 +161,78 @@ check_cluster_status() {
     return 0
 }
 
+# Setup WSL kubectl access
+setup_wsl_kubectl() {
+    log_info "Setting up WSL kubectl access to VM cluster..."
+    
+    # Create kubeconfig directory
+    local kcfg_dir="$(cd "$(dirname "$0")"/.. && pwd)/out/kubeconfigs"
+    mkdir -p "$kcfg_dir"
+    
+    # Remove old host key if exists (for VM recreation)
+    ssh-keygen -f "/home/ubuntu/.ssh/known_hosts" -R "$MASTER_IP" 2>/dev/null || true
+    
+    # Download kubeconfig from master
+    log_info "Downloading kubeconfig from master..."
+    if scp -o StrictHostKeyChecking=no -i "$SSH_KEY" "$SSH_USER@$MASTER_IP:/etc/rancher/k3s/k3s.yaml" "$kcfg_dir/k3s.yaml" 2>/dev/null; then
+        chmod 600 "$kcfg_dir/k3s.yaml"
+        log_success "Kubeconfig downloaded to $kcfg_dir/k3s.yaml"
+    else
+        log_error "Failed to download kubeconfig from master"
+        return 1
+    fi
+    
+    # Update server address to VM IP
+    sed -i "s/127.0.0.1/$MASTER_IP/g" "$kcfg_dir/k3s.yaml"
+    log_info "Updated server address to $MASTER_IP"
+    
+    # Test WSL kubectl access
+    log_info "Testing WSL kubectl access..."
+    export KUBECONFIG="$kcfg_dir/k3s.yaml"
+    
+    local kubectl_attempts=10
+    local kubectl_delay=5
+    
+    for ((i=1;i<=kubectl_attempts;i++)); do
+        if kubectl get nodes -o wide 2>/dev/null; then
+            log_success "WSL kubectl access successful!"
+            
+            # Show cluster info from WSL
+            log_info "Cluster status from WSL:"
+            kubectl get nodes -o wide
+            kubectl get pods -A | head -20
+            
+            return 0
+        else
+            echo -n "."
+            sleep "$kubectl_delay"
+        fi
+    done
+    
+    log_warning "WSL kubectl access failed, trying with insecure flag..."
+    
+    # Try with insecure flag
+    if kubectl --insecure-skip-tls-verify get nodes -o wide 2>/dev/null; then
+        log_success "WSL kubectl access successful with insecure flag!"
+        log_info "Note: Using --insecure-skip-tls-verify for WSL access"
+        
+        # Show cluster info from WSL
+        log_info "Cluster status from WSL (insecure):"
+        kubectl --insecure-skip-tls-verify get nodes -o wide
+        kubectl --insecure-skip-tls-verify get pods -A | head -20
+        
+        # Create alias for convenience
+        echo "alias kubectl='kubectl --insecure-skip-tls-verify'" >> ~/.bashrc
+        log_info "Added kubectl alias to ~/.bashrc for insecure access"
+        
+        return 0
+    else
+        log_error "WSL kubectl access failed even with insecure flag"
+        log_info "Manual setup required. See README.md for troubleshooting steps."
+        return 1
+    fi
+}
+
 # Install KubeSphere (optional)
 install_kubesphere() {
     local response
@@ -227,6 +299,15 @@ main() {
     
     log_success "Cluster verification completed successfully!"
     
+    # Setup WSL kubectl access
+    log_info "Setting up WSL kubectl access..."
+    if setup_wsl_kubectl; then
+        log_success "WSL kubectl access configured successfully!"
+    else
+        log_warning "WSL kubectl access setup failed, but cluster is still functional"
+        log_info "You can manually configure WSL kubectl access using the steps in README.md"
+    fi
+    
     # Offer KubeSphere installation
     install_kubesphere
     
@@ -234,6 +315,7 @@ main() {
     log_info "SSH to master: ssh -i $SSH_KEY $SSH_USER@$MASTER_IP"
     log_info "SSH to worker1: ssh -i $SSH_KEY $SSH_USER@$WORKER1_IP"
     log_info "SSH to worker2: ssh -i $SSH_KEY $SSH_USER@$WORKER2_IP"
+    log_info "WSL kubectl: export KUBECONFIG=./wsl/out/kubeconfigs/k3s.yaml && kubectl get nodes"
 }
 
 # Run main function

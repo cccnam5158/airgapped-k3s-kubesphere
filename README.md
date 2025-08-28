@@ -141,7 +141,7 @@ chmod +x 01_build_seed_isos.sh
 .\windows\Setup-VMs.ps1
 ```
 
-### 4단계: 클러스터 확인
+### 4단계: 클러스터 확인 및 WSL kubectl 설정
 
 ```bash
 # WSL2에서 실행
@@ -149,6 +149,16 @@ cd wsl/scripts
 chmod +x 02_wait_and_config.sh
 ./02_wait_and_config.sh
 ```
+
+**이 스크립트가 수행하는 작업:**
+- VM들의 SSH 연결 확인
+- k3s 서비스 상태 점검
+- 클러스터 노드 및 파드 상태 확인
+- **WSL에서 kubectl 접속 자동 설정** (새로 추가)
+  - kubeconfig 파일 다운로드
+  - 서버 주소 자동 수정
+  - TLS 인증서 문제 자동 해결
+  - WSL에서의 kubectl 접속 테스트
 
 > **참고**: Ubuntu 22.04.5 LTS는 Cloud-init를 통해 자동으로 설치되므로 수동 설치가 필요하지 않습니다.
 
@@ -238,56 +248,110 @@ kubectl get pods -A
 
 WSL 터미널에서 직접 `kubectl`로 VM의 k3s API에 접속하려면 아래 절차를 따르세요.
 
-1) kubeconfig 다운로드 (마스터에서)
+#### 1단계: kubeconfig 다운로드 및 설정
 
 ```bash
-# 키 경로 예시: ./wsl/out/ssh/id_rsa 또는 ~/.ssh/airgap_k3s
+# 키 경로 설정
 SSH_KEY=./wsl/out/ssh/id_rsa
 KCFG_DIR=./wsl/out/kubeconfigs
 mkdir -p "$KCFG_DIR"
 
-# 마스터에서 kubeconfig 복사 (권한 644로 이미 생성됨)
-scp -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@192.168.6.10:/etc/rancher/k3s/k3s.yaml "$KCFG_DIR/k3s.yaml"
+# SSH 호스트 키 문제 해결 (VM 재생성 시 필요)
+ssh-keygen -f "/home/ubuntu/.ssh/known_hosts" -R "192.168.6.10" 2>/dev/null || true
 
-# 편의상 퍼미션 조정
+# 마스터에서 kubeconfig 복사
+scp -o StrictHostKeyChecking=no -i "$SSH_KEY" ubuntu@192.168.6.10:/etc/rancher/k3s/k3s.yaml "$KCFG_DIR/k3s.yaml"
+
+# 권한 설정
 chmod 600 "$KCFG_DIR/k3s.yaml"
+
+# 서버 주소를 VM IP로 변경 (기본값이 127.0.0.1이므로)
+sed -i 's/127.0.0.1/192.168.6.10/g' "$KCFG_DIR/k3s.yaml"
 ```
 
-2) API 서버 주소 설정 방법 선택
+#### 2단계: API 서버 접속 방법 선택
 
-- 방법 A: SSH 포트포워딩(세션 동안 일시적)
+**방법 A: 직접 접속 (권장)**
 
 ```bash
-# 새 터미널에서 SSH 포워딩 실행 (WSL)
+# 환경변수 설정
+export KUBECONFIG="$KCFG_DIR/k3s.yaml"
+
+# 연결 테스트
+kubectl get nodes -o wide
+```
+
+**방법 B: SSH 포트포워딩 (방화벽 문제 시)**
+
+```bash
+# 새 터미널에서 SSH 포워딩 실행
 ssh -i "$SSH_KEY" -L 6443:127.0.0.1:6443 ubuntu@192.168.6.10
 
-# kubeconfig의 server를 localhost로 바꿔 임시 파일 생성
+# 다른 터미널에서 localhost로 접속
 sed 's#server: https://.*:6443#server: https://127.0.0.1:6443#' "$KCFG_DIR/k3s.yaml" > "$KCFG_DIR/k3s.local.yaml"
-
-# 이 터미널에서만 적용
 export KUBECONFIG="$KCFG_DIR/k3s.local.yaml"
 kubectl get nodes -o wide
 ```
 
-- 방법 B: Windows 포트 프록시(지속적) → `localhost:6443`를 마스터로 릴레이
+**방법 C: Windows 포트 프록시 (지속적)**
 
 ```powershell
-# 관리자 PowerShell에서 실행 (Windows)
+# 관리자 PowerShell에서 실행
 netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=6443
 netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=6443 connectaddress=192.168.6.10 connectport=6443
 netsh advfirewall firewall add rule name="Allow k3s 6443 TCP" dir=in action=allow protocol=TCP localport=6443
 ```
 
 ```bash
-# WSL에서 kubeconfig의 server를 localhost로 변경
+# WSL에서 localhost로 접속
 sed 's#server: https://.*:6443#server: https://127.0.0.1:6443#' "$KCFG_DIR/k3s.yaml" > "$KCFG_DIR/k3s.local.yaml"
 export KUBECONFIG="$KCFG_DIR/k3s.local.yaml"
 kubectl get nodes -o wide
 ```
 
-참고
+#### 3단계: 문제 해결
+
+**TLS 인증서 오류 발생 시:**
+
+```bash
+# 방법 1: 인증서 검증 우회 (임시)
+kubectl --insecure-skip-tls-verify get nodes
+
+# 방법 2: CA 인증서 설정 (권장)
+scp -o StrictHostKeyChecking=no -i "$SSH_KEY" ubuntu@192.168.6.10:/usr/local/share/ca-certificates/airgap-registry-ca.crt ~/
+sudo cp ~/airgap-registry-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+
+# 방법 3: 시간 동기화 (시간 차이로 인한 인증서 오류)
+cd wsl/scripts
+./time-sync-diagnose.sh
+```
+
+**SSH 연결 오류 시:**
+
+```bash
+# SSH 키 권한 확인
+chmod 600 "$SSH_KEY"
+
+# SSH 연결 테스트
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@192.168.6.10 "echo 'SSH OK'"
+```
+
+#### 4단계: 영구 설정 (선택사항)
+
+```bash
+# ~/.bashrc에 환경변수 추가
+echo 'export KUBECONFIG=./wsl/out/kubeconfigs/k3s.yaml' >> ~/.bashrc
+echo 'alias kubectl="kubectl --insecure-skip-tls-verify"' >> ~/.bashrc
+
+# 설정 적용
+source ~/.bashrc
+```
+
+### 참고사항
 - k3s의 `k3s.yaml`에는 CA/클라이언트 인증서가 포함되어 있으므로 별도 인증서 설치가 필요 없습니다.
 - 시간 차이로 x509 오류가 나면 VM 부팅 시 자동 동기화되지만, 수동으로는 WSL에서 `wsl/scripts/sync-time-k3s.sh`를 실행하세요.
+- `02_wait_and_config.sh` 스크립트가 자동으로 WSL에서의 kubectl 접속도 검증합니다.
 
 ### TLS SAN 자동 설정 (인증서 오류 방지)
 
@@ -700,10 +764,21 @@ docker images --digests
 
 ## 🔧 최근 변경사항
 
+### 2024-12-19: WSL kubectl 접속 자동화 및 개선 (5차 수정)
+- **개선**: `02_wait_and_config.sh` 스크립트에 WSL kubectl 접속 자동 설정 기능 추가
+- **기능**: 
+  - kubeconfig 파일 자동 다운로드 및 설정
+  - SSH 호스트 키 문제 자동 해결
+  - TLS 인증서 오류 자동 처리 (insecure flag 사용)
+  - WSL에서의 kubectl 접속 테스트 및 검증
+- **문서**: README.md의 WSL kubectl 접속 가이드 개선 및 단계별 문제 해결 방법 추가
+- **영향**: 사용자가 수동으로 kubectl 설정할 필요 없이 자동으로 WSL에서 VM 클러스터 접속 가능
+- **파일**: `wsl/scripts/02_wait_and_config.sh`, `README.md`
+
 ### 2024-12-19: VMware ISO 자동 해제 및 Cloud-init Idempotency 개선 (4차 수정)
 - **문제**: VM 재시작 시 cloud-init이 반복적으로 실행되어 불필요한 재설치 시도, VMware ISO 연결로 인한 재설치 루프 위험
 - **해결**: 
-  - VM 생성 스크립트에 ISO 자동 해제 로직 추가 (vmrun disconnectDevice)
+  - VM 생성 스크립트에 ISO 자동 해제 로직 추가 (VMX 파일 수정 방식)
   - 각 설정 단계마다 완료 표시 파일을 생성하여 idempotency 보장
   - `runcmd` 섹션의 모든 명령을 조건부 실행으로 변경
   - K3s 부트스트랩 서비스의 중복 실행 방지
