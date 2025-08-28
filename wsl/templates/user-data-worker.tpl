@@ -90,6 +90,7 @@ autoinstall:
     - echo "=== Cloud-init late-commands 완료 (Worker) ===" >> /var/log/cloud-init-debug.log
     - date >> /var/log/cloud-init-debug.log
     - echo "설치 완료, 재부팅 준비 중..." >> /var/log/cloud-init-debug.log
+    - echo "ISO 파일 복사 완료" > /target/var/lib/iso-copy-complete
 
   user-data:
     # 에어갭 환경에서는 package_update/upgrade 비활성화
@@ -551,48 +552,39 @@ autoinstall:
           touch /var/lib/k3s-agent-bootstrap.done
 
     runcmd:
-      # 타임존을 먼저 설정
-      - [ timedatectl, set-timezone, Asia/Seoul ]
-      - [ timedatectl, set-local-rtc, "0" ]
-      - [ timedatectl, set-local-rtc, "0" ]
-      
-      # 시간 동기화 실행
-      - [ systemctl, enable, sync-time.service ]
-      - [ systemctl, start, sync-time.service ]
-      
-      # Update CA certificates
-      - [ update-ca-certificates ]
+      # Cloud-init 완료 표시 파일 생성 (idempotency 보장)
+      - [ bash, -c, "echo 'Cloud-init completed at $(date)' > /var/lib/cloud-init-complete" ]
 
-      # Disable swap
-      - [ swapoff, -a ]
-      - [ systemctl, enable, disable-swap.service ]
-      - [ systemctl, start, disable-swap.service ]
+      # 타임존을 먼저 설정 (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/timezone-set ]; then timedatectl set-timezone Asia/Seoul && timedatectl set-local-rtc 0 && echo 'Timezone set' > /var/lib/timezone-set; fi" ]
+      
+      # 시간 동기화 실행 (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/sync-time-enabled ]; then systemctl enable sync-time.service && systemctl start sync-time.service && echo 'Sync-time enabled' > /var/lib/sync-time-enabled; fi" ]
+      
+      # Update CA certificates (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/ca-certificates-updated ]; then update-ca-certificates && echo 'CA certificates updated' > /var/lib/ca-certificates-updated; fi" ]
 
-      # Apply sysctl settings
-      - [ sysctl, --system ]
+      # Disable swap (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/swap-disabled ]; then swapoff -a && systemctl enable disable-swap.service && systemctl start disable-swap.service && echo 'Swap disabled' > /var/lib/swap-disabled; fi" ]
+
+      # Apply sysctl settings (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/sysctl-applied ]; then sysctl --system && echo 'Sysctl applied' > /var/lib/sysctl-applied; fi" ]
 
       # Hostname은 identity에서 설정됨
 
-      # Load kernel modules
-      - [ modprobe, overlay ]
-      - [ modprobe, br_netfilter ]
+      # Load kernel modules (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/kernel-modules-loaded ]; then modprobe overlay && modprobe br_netfilter && echo 'Kernel modules loaded' > /var/lib/kernel-modules-loaded; fi" ]
 
-      # Run worker bootstrap once during cloud-init, and enable service for retries on failure/reboot
-      - [ systemctl, daemon-reload ]
-      - [ systemctl, enable, sync-time.service ]
-      - [ systemctl, start, sync-time.service ]
-      - [ bash, -c, "sed -i 's/\\r$//' /usr/local/bin/setup-k3s-worker.sh /etc/systemd/system/k3s-agent-bootstrap.service || true" ]
-      - [ bash, -c, "bash -x /usr/local/bin/setup-k3s-worker.sh | tee -a /var/log/k3s-agent-bootstrap.log || true" ]
-      - [ systemctl, enable, k3s-agent-bootstrap.service ]
+      # Run worker bootstrap only if not already completed (idempotency)
+      - [ bash, -c, "if [ ! -f /var/lib/k3s-agent-bootstrap.done ]; then systemctl daemon-reload && sed -i 's/\\r$//' /usr/local/bin/setup-k3s-worker.sh /etc/systemd/system/k3s-agent-bootstrap.service 2>/dev/null || true && bash -x /usr/local/bin/setup-k3s-worker.sh | tee -a /var/log/k3s-agent-bootstrap.log && systemctl enable k3s-agent-bootstrap.service; else echo 'K3s agent bootstrap already completed, skipping'; fi" ]
 
-      # Apply auto-login overrides
-      - [ systemctl, restart, getty@tty1.service ]
-      - [ systemctl, restart, serial-getty@ttyS0.service ]
+      # Apply auto-login overrides (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/autologin-configured ]; then systemctl restart getty@tty1.service && systemctl restart serial-getty@ttyS0.service && echo 'Auto-login configured' > /var/lib/autologin-configured; fi" ]
 
-      # Create kubectl alias
-      - [ bash, -c, "echo 'alias kubectl=\"k3s kubectl\"' >> /home/ubuntu/.bashrc" ]
+      # Create kubectl alias (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/kubectl-alias-created ]; then echo 'alias kubectl=\"k3s kubectl\"' >> /home/ubuntu/.bashrc && echo 'Kubectl alias created' > /var/lib/kubectl-alias-created; fi" ]
 
-      # SSH 서비스 재시작 (보안 설정 적용)
-      - [ systemctl, restart, ssh ]
+      # SSH 서비스 재시작 (보안 설정 적용, 한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/ssh-restarted ]; then systemctl restart ssh && echo 'SSH restarted' > /var/lib/ssh-restarted; fi" ]
 
     final_message: "K3s worker node setup completed in airgap environment with autoinstall!"

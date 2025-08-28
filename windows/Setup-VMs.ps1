@@ -460,6 +460,96 @@ try {
         }
         
         Write-Success "All VMs started successfully"
+        
+        # Wait for initial boot and then safely disconnect ISO to prevent reinstall loop
+        Write-Info "Waiting for VMs to complete initial boot and file copy..."
+        
+        # Function to wait for ISO copy completion
+        function Wait-ForISOCopy {
+            param(
+                [string]$VmxPath,
+                [string]$VmName,
+                [int]$MaxWaitMinutes = 15
+            )
+            
+            Write-Info "Waiting for ISO file copy completion on $VmName (max $MaxWaitMinutes minutes)..."
+            $startTime = Get-Date
+            $timeout = $startTime.AddMinutes($MaxWaitMinutes)
+            
+            while ((Get-Date) -lt $timeout) {
+                try {
+                    # Check if ISO copy completion file exists
+                    $result = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/iso-copy-complete && echo 'COMPLETE' || echo 'INCOMPLETE'" 2>$null
+                    
+                    if ($result -eq "COMPLETE") {
+                        Write-Success "ISO file copy completed on $VmName"
+                        return $true
+                    }
+                    
+                    # Check if VM is still booting (cloud-init in progress)
+                    $cloudInitStatus = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "cloud-init status 2>/dev/null | grep -E 'running|done' || echo 'BOOTING'" 2>$null
+                    
+                    if ($cloudInitStatus -like "*running*") {
+                        Write-Info "Cloud-init still running on $VmName, waiting..."
+                    } elseif ($cloudInitStatus -like "*done*") {
+                        Write-Info "Cloud-init completed on $VmName, checking file copy..."
+                    } else {
+                        Write-Info "VM $VmName still booting, waiting..."
+                    }
+                    
+                    Start-Sleep -Seconds 30
+                    
+                } catch {
+                    Write-Warning "Error checking $VmName status: $_"
+                    Start-Sleep -Seconds 30
+                }
+            }
+            
+            Write-Warning "Timeout waiting for ISO copy completion on $VmName after $MaxWaitMinutes minutes"
+            return $false
+        }
+        
+        # Wait for master VM
+        $masterCopyComplete = Wait-ForISOCopy -VmxPath $masterVmx -VmName $MasterName
+        
+        # Wait for worker VMs
+        $workerCopyComplete = @()
+        for ($i=0; $i -lt $workerVmx.Count; $i++) {
+            $workerCopyComplete += Wait-ForISOCopy -VmxPath $workerVmx[$i] -VmName $WorkerNames[$i]
+        }
+        
+        Write-Info "Disconnecting ISO files to prevent reinstall loop..."
+        
+        # Disconnect ISO from master VM
+        Write-Info "Disconnecting ISO from master VM: $MasterName"
+        try {
+            & $script:VMRUN_PATH -T ws disconnectDevice $masterVmx "sata0:1" 2>$null
+            if ($masterCopyComplete) {
+                Write-Success "ISO safely disconnected from master VM (copy completed)"
+            } else {
+                Write-Warning "ISO disconnected from master VM (copy may be incomplete)"
+            }
+        } catch {
+            Write-Warning "Failed to disconnect ISO from master VM: $_"
+        }
+        
+        # Disconnect ISO from worker VMs
+        for ($i=0; $i -lt $workerVmx.Count; $i++) {
+            Write-Info "Disconnecting ISO from worker VM: $($WorkerNames[$i])"
+            try {
+                & $script:VMRUN_PATH -T ws disconnectDevice $workerVmx[$i] "sata0:1" 2>$null
+                if ($workerCopyComplete[$i]) {
+                    Write-Success "ISO safely disconnected from worker VM: $($WorkerNames[$i]) (copy completed)"
+                } else {
+                    Write-Warning "ISO disconnected from worker VM: $($WorkerNames[$i]) (copy may be incomplete)"
+                }
+            } catch {
+                Write-Warning "Failed to disconnect ISO from worker VM $($WorkerNames[$i]): $_"
+            }
+        }
+        
+        Write-Success "ISO disconnection completed"
+        
     } else {
         Write-Info "VM startup skipped (use -SkipVMStart to skip)"
     }

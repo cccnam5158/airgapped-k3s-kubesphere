@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Read(/mnt/c/Users/MZC03-JOSEPH.NAM/dev/airgapped-k3s-kubesphere/**)",
+      "Read(/mnt/c/Users/MZC03-JOSEPH.NAM/dev/airgapped-k3s-kubesphere/wsl/examples/**)",
+      "Read(/mnt/c/Users/MZC03-JOSEPH.NAM/dev/airgapped-k3s-kubesphere/scripts/**)",
+      "Read(/mnt/c/Users/MZC03-JOSEPH.NAM/dev/airgapped-k3s-kubesphere/**)",
+      "Read(/mnt/c/Users/MZC03-JOSEPH.NAM/dev/airgapped-k3s-kubesphere/**)",
+      "Read(/mnt/c/Users/MZC03-JOSEPH.NAM/dev/airgapped-k3s-kubesphere/scripts/**)"
+    ],
+    "deny": []
+  }
+}

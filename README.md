@@ -547,14 +547,37 @@ chmod +x time-sync-diagnose.sh
 
 ### 증상
 - VM을 재부팅하면 Ubuntu 설치가 다시 시작되거나 cloud-init autoinstall 화면으로 진입함
+- VM 재시작 시 cloud-init이 반복적으로 실행되어 불필요한 재설치 시도
 
 ### 원인
 - VM의 부팅 순서가 `cdrom,disk`로 설정되어 있어, 설치가 끝난 뒤에도 Seed ISO가 연결된 상태에서 CD가 먼저 부팅됨
 - Seed ISO에는 `autoinstall ds=nocloud\;s=/cdrom/autoinstall/` 커널 파라미터가 포함되어 있어 매 부팅 시 설치가 재시작됨
+- cloud-init의 idempotency가 제대로 보장되지 않아 매번 실행 시마다 모든 설정을 다시 적용
 
 ### 조치 사항 (프로젝트 반영)
 - `windows/Setup-VMs.ps1`에서 부팅 순서를 `disk,cdrom`으로 변경하여, 설치 완료 후에는 디스크가 우선 부팅되도록 수정했습니다.
 - BIOS PXE 부팅은 비활성화 상태를 유지합니다.
+- **cloud-init idempotency 개선**: 각 설정 단계마다 완료 표시 파일을 생성하여 중복 실행을 방지합니다.
+
+### Cloud-init Idempotency 개선 (2024-12-19)
+각 설정 단계가 한 번만 실행되도록 완료 표시 파일을 사용합니다:
+
+```bash
+# 완료 표시 파일들 (VM 내부에서 확인)
+ls -la /var/lib/cloud-init-complete          # Cloud-init 전체 완료
+ls -la /var/lib/timezone-set                 # 타임존 설정 완료
+ls -la /var/lib/sync-time-enabled            # 시간 동기화 완료
+ls -la /var/lib/ca-certificates-updated      # CA 인증서 업데이트 완료
+ls -la /var/lib/swap-disabled                # 스왑 비활성화 완료
+ls -la /var/lib/sysctl-applied               # sysctl 설정 완료
+ls -la /var/lib/hostname-set                 # 호스트명 설정 완료
+ls -la /var/lib/kernel-modules-loaded        # 커널 모듈 로드 완료
+ls -la /var/lib/k3s-bootstrap.done           # K3s 마스터 부트스트랩 완료
+ls -la /var/lib/k3s-agent-bootstrap.done     # K3s 워커 부트스트랩 완료
+ls -la /var/lib/autologin-configured         # 자동 로그인 설정 완료
+ls -la /var/lib/kubectl-alias-created        # kubectl 별칭 생성 완료
+ls -la /var/lib/ssh-restarted                # SSH 재시작 완료
+```
 
 ### 이미 생성된 VM에 대한 워크어라운드
 1) VMware Workstation에서 각 VM의 설정을 열고, CD/DVD 장치의 `연결됨(Connected)` 체크를 해제하거나 ISO 연결을 제거합니다.
@@ -576,8 +599,59 @@ ls -l /var/lib/k3s-agent-bootstrap.done || true
 
 파일이 존재하면 설치 스크립트는 재실행되지 않습니다. 파일이 없다면 최초 설치가 완료되지 않은 상태일 수 있으므로 `sudo tail -n 200 /var/log/k3s-bootstrap.log`(마스터) 또는 `/var/log/k3s-agent-bootstrap.log`(워커)를 확인하세요.
 
+### 문제 진단 및 해결
+VM에서 cloud-init이 반복 실행되는 문제가 발생하면:
+
+```bash
+# Cloud-init 상태 확인
+sudo cloud-init status --long
+
+# Cloud-init 로그 확인
+sudo tail -f /var/log/cloud-init.log
+
+# 완료 표시 파일 확인
+ls -la /var/lib/cloud-init-complete
+
+# K3s 부트스트랩 로그 확인
+sudo tail -f /var/log/k3s-bootstrap.log          # 마스터
+sudo tail -f /var/log/k3s-agent-bootstrap.log    # 워커
+
+# 수동으로 완료 표시 파일 생성 (필요시)
+sudo mkdir -p /var/lib
+sudo touch /var/lib/cloud-init-complete
+```
+
 ### 참고
 - ISO를 분리하지 않아도 `disk,cdrom` 순서면 디스크가 먼저 부팅되어 재설치 루프를 예방할 수 있습니다.
+- Cloud-init idempotency 개선으로 VM 재시작 시 불필요한 재설치가 방지됩니다.
+
+### ⚠️ 중요: VMware ISO 연결 해제
+
+VM 내부에서 eject를 했더라도 VMware Workstation의 설정에서 ISO가 여전히 연결되어 있으면, VM을 재부팅할 때 다시 설치가 진행될 수 있습니다.
+
+#### 자동 해결 (권장)
+VM 생성 스크립트가 자동으로 ISO 연결을 해제합니다:
+- VM 부팅 후 ISO 파일 복사 완료까지 대기 (최대 15분)
+- 파일 복사 완료 신호 확인 후 ISO 장치 자동 해제
+- 재설치 루프 완전 방지
+- 안전한 파일 복사 보장
+
+#### 수동 해결
+VMware Workstation에서 수동으로 ISO 연결을 해제하려면:
+
+1. **VM 선택** → **Edit Settings**
+2. **CD/DVD 장치** 선택
+3. **"Connected" 체크 해제** 또는 **ISO 파일 연결 제거**
+4. **OK** 클릭
+
+#### 확인 방법
+```bash
+# VM 내부에서 CD-ROM 장치 확인
+ls -la /dev/sr* /dev/cd* /dev/scd* 2>/dev/null || echo "CD-ROM 장치 없음"
+
+# VMware 설정에서 ISO 연결 상태 확인
+# Edit Settings → CD/DVD → Connected 체크 해제됨
+```
 
 ## 🔒 보안 및 안정성
 
@@ -625,6 +699,25 @@ docker images --digests
 - **IP 대역**: 192.168.6.x (통일된 네트워크 설정)
 
 ## 🔧 최근 변경사항
+
+### 2024-12-19: VMware ISO 자동 해제 및 Cloud-init Idempotency 개선 (4차 수정)
+- **문제**: VM 재시작 시 cloud-init이 반복적으로 실행되어 불필요한 재설치 시도, VMware ISO 연결로 인한 재설치 루프 위험
+- **해결**: 
+  - VM 생성 스크립트에 ISO 자동 해제 로직 추가 (vmrun disconnectDevice)
+  - 각 설정 단계마다 완료 표시 파일을 생성하여 idempotency 보장
+  - `runcmd` 섹션의 모든 명령을 조건부 실행으로 변경
+  - K3s 부트스트랩 서비스의 중복 실행 방지
+- **영향**: VM 재시작 시 불필요한 재설치 완전 방지, 안정적인 클러스터 운영
+- **파일**: `windows/Setup-VMs.ps1`, `wsl/templates/user-data-master.tpl`, `wsl/templates/user-data-worker.tpl`
+
+### 2024-12-19: Cloud-init Idempotency 개선 (3차 수정)
+- **문제**: VM 재시작 시 cloud-init이 반복적으로 실행되어 불필요한 재설치 시도
+- **해결**: 
+  - 각 설정 단계마다 완료 표시 파일을 생성하여 idempotency 보장
+  - `runcmd` 섹션의 모든 명령을 조건부 실행으로 변경
+  - K3s 부트스트랩 서비스의 중복 실행 방지
+- **영향**: VM 재시작 시 불필요한 재설치 방지, 안정적인 클러스터 운영
+- **파일**: `wsl/templates/user-data-master.tpl`, `wsl/templates/user-data-worker.tpl`
 
 ### 2024-12-19: VM 자동 설치 개선 (2차 수정)
 - **문제**: VM 설치 시 언어 선택 화면이 계속 나타나는 문제
