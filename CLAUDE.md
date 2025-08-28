@@ -140,11 +140,55 @@ k3s kubectl get pods -A
 - Verify file permissions on generated artifacts in `wsl/out/`
 - Check WSL2 Docker daemon with `docker info`
 
+### Common Debug Commands
+```bash
+# Check registry status and images
+docker ps | grep registry
+curl -k https://localhost:5000/v2/_catalog | jq
+
+# VM cluster status checks
+SSH_KEY=./wsl/out/ssh/id_rsa
+ssh -i "$SSH_KEY" ubuntu@192.168.6.10 "sudo systemctl status k3s"
+ssh -i "$SSH_KEY" ubuntu@192.168.6.10 "sudo tail -f /var/log/k3s-bootstrap.log"
+ssh -i "$SSH_KEY" ubuntu@192.168.6.11 "sudo tail -f /var/log/k3s-agent-bootstrap.log"
+
+# Check k3s cluster from master
+ssh -i "$SSH_KEY" ubuntu@192.168.6.10 "sudo /usr/local/bin/k3s kubectl get nodes -o wide"
+ssh -i "$SSH_KEY" ubuntu@192.168.6.10 "sudo /usr/local/bin/k3s kubectl get pods -A"
+```
+
+```powershell
+# Windows debug commands
+Get-NetTCPConnection -LocalPort 5000  # Check port forwarding
+vmrun -T ws list  # List running VMs
+.\scripts\test-registry-access.ps1  # Test VM registry access
+```
+
 ### Extending the Environment
 - Add new container images to `wsl/examples/images-fixed.txt`
 - Update k3s version by changing download URLs in `00_prep_offline_fixed.sh`
 - Modify VM specs by updating parameters in `Setup-VMs.ps1`
 - Add new cloud-init steps in template files for additional software
+
+## Script Dependencies and Execution Context
+
+### Environment Context Switching
+- **PowerShell commands** must run as Administrator on Windows host
+- **WSL2 bash scripts** run in Ubuntu 22.04 environment
+- **VM SSH access** requires private key at `./wsl/out/ssh/id_rsa`
+
+### Script Execution Dependencies
+1. **00_prep_offline_fixed.sh** must complete before any VM creation
+2. **setup-port-forwarding.ps1** must run before VMs can access registry
+3. **01_build_seed_isos.sh** must run before **Setup-VMs.ps1**
+4. **Setup-VMs.ps1** creates VMs that auto-install via cloud-init templates
+5. **02_wait_and_config.sh** validates cluster formation after VM boot
+
+### File Generation Flow
+- Templates in `wsl/templates/` generate cloud-init configurations
+- Scripts populate `wsl/out/` with certificates, keys, ISOs, and binaries
+- Images list in `wsl/examples/images-fixed.txt` drives container mirroring
+- Generated artifacts in `wsl/out/` are mounted/copied to VMs during installation
 
 ## Important Notes
 
@@ -153,3 +197,4 @@ k3s kubectl get pods -A
 - **Airgapped Design**: All internet connectivity happens only during initial image mirroring phase
 - **Version Compatibility**: k3s v1.33.4-rc1 is specifically chosen for KubeSphere v4.1.3 compatibility
 - **Certificate Management**: Uses self-signed certificates for the local container registry
+- **Cloud-init Automation**: VMs install automatically via templates, no manual Ubuntu installation needed
