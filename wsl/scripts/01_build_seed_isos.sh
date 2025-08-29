@@ -716,6 +716,12 @@ copy_additional_files() {
     
     # Airgapped 환경용 패키지 다운로드 및 복사
     log_info "Airgapped 환경용 패키지들을 다운로드합니다..."
+    
+    # 패키지 다운로드 디렉토리 설정 (scripts/ops-packages)
+    local download_dir="$(dirname "$0")/ops-packages"
+    mkdir -p "$download_dir"
+    
+    # VM용 패키지 디렉토리
     local packages_dir="$files_dir/packages"
     mkdir -p "$packages_dir"
     
@@ -748,7 +754,7 @@ copy_additional_files() {
     )
     
     # 패키지 다운로드 (개선된 방식)
-    cd "$packages_dir"
+    cd "$download_dir"
     
     # 의존성 패키지 먼저 다운로드 (설치 순서 최적화)
     log_info "의존성 패키지 다운로드 중..."
@@ -803,14 +809,22 @@ copy_additional_files() {
         local archive_size=$(du -h "k8s-ops-packages.tar.gz" | cut -f1)
         log_info "압축 파일 크기: $archive_size"
         
-        # 원본 deb 파일들 삭제 (압축 파일만 유지)
-        rm -f *.deb
-        log_info "원본 deb 파일들 삭제됨 (압축 파일만 유지)"
+            # 원본 deb 파일들 삭제 (압축 파일만 유지)
+    rm -f *.deb
+    log_info "원본 deb 파일들 삭제됨 (압축 파일만 유지)"
+    
+    # 압축 파일을 VM용 디렉토리로 복사
+    cp "k8s-ops-packages.tar.gz" "$packages_dir/"
+    log_info "압축 파일을 VM용 디렉토리로 복사: $packages_dir/"
     else
         log_warning "압축할 deb 파일이 없습니다"
         # 빈 tar.gz 파일 생성 (VM에서 오류 방지)
         tar -czf "k8s-ops-packages.tar.gz" --files-from /dev/null
         log_info "빈 k8s-ops-packages.tar.gz 파일 생성됨 (VM 호환성용)"
+        
+        # 빈 압축 파일을 VM용 디렉토리로 복사
+        cp "k8s-ops-packages.tar.gz" "$packages_dir/"
+        log_info "빈 압축 파일을 VM용 디렉토리로 복사: $packages_dir/"
     fi
     
     # 패키지 설치 스크립트 생성 (tar.gz 압축 해제 포함)
@@ -878,7 +892,12 @@ log "패키지 설치 완료!"
 EOF
     chmod +x "$packages_dir/install-packages.sh"
     
+    # 작업 디렉토리를 원래 위치로 복원
+    cd "$(dirname "$0")"
+    
     log_success "Airgapped 환경용 패키지 준비 완료 (tar.gz 압축 포함)"
+    log_info "패키지 다운로드 위치: $download_dir"
+    log_info "VM용 패키지 위치: $packages_dir"
     
     # WSL 기준 빌드 시각 기록 (부팅 시 초기 오프라인 시간 동기화에 사용)
     if command -v date &> /dev/null; then
