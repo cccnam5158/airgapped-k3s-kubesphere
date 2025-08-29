@@ -26,7 +26,9 @@ airgapped-k3s-kubesphere/
 │   ├── scripts/                # WSL2 실행 스크립트
 │   │   ├── 00_prep_offline_fixed.sh # 오프라인 준비 (이미지 미러링, 인증서 생성)
 │   │   ├── 01_build_seed_isos.sh # Ubuntu 22.04.5 기반 Seed ISO 생성
-│   │   └── 02_wait_and_config.sh # 클러스터 확인 및 설정
+│   │   ├── 02_wait_and_config.sh # 클러스터 확인 및 설정
+│   │   ├── check-vm-packages.sh # VM 내부 패키지 설치 상태 점검
+│   │   └── fix-vm-packages.sh   # VM 내부 패키지 설치 문제 수동 복구
 │   ├── templates/              # cloud-init 템플릿
 │   │   ├── user-data-master.tpl # 마스터 노드 템플릿
 │   │   └── user-data-worker.tpl # 워커 노드 템플릿
@@ -100,6 +102,17 @@ chmod +x 00_prep_offline_fixed.sh
 .\scripts\setup-port-forwarding.ps1
 ```
 
+### 3단계: Seed ISO 생성 (개선된 k8s 운영 도구 포함)
+
+```bash
+# WSL2 Ubuntu에서 Seed ISO 생성
+cd wsl/scripts
+chmod +x 01_build_seed_isos.sh
+./01_build_seed_isos.sh
+```
+
+> **🆕 개선사항**: 이제 k8s 운영에 필요한 도구들(jq, htop, ethtool, iproute2, dnsutils, telnet, psmisc, sysstat, iftop, iotop, dstat, yq)이 자동으로 포함됩니다.
+
 ### 3단계: 시간 동기화 확인 (새로 추가)
 
 VM과 WSL 간의 시간 차이를 해결하기 위해 시간 동기화를 확인합니다:
@@ -138,8 +151,35 @@ chmod +x 01_build_seed_isos.sh
 
 ```powershell
 # VM 생성 및 부팅
-.\windows\Setup-VMs.ps1
+.\scripts\setup-vms.ps1
 ```
+
+### 3.5단계: VM 상태 점검 (선택사항)
+
+VM이 정상적으로 생성되었는지 확인하려면 점검 스크립트를 사용하세요:
+
+```powershell
+# 모든 VM 점검
+.\scripts\check-vm-health.ps1
+
+# 특정 VM만 점검
+.\scripts\check-vm-health.ps1 -VmName k3s-master1
+
+# SSH 키 경로 지정
+.\scripts\check-vm-health.ps1 -SshKeyPath "..\wsl\out\ssh\id_rsa"
+```
+
+**점검 항목:**
+- 시스템 정보 (OS, 커널, 리소스)
+- 네트워크 연결 (인터페이스, IP, 게이트웨이, DNS)
+- 필수 서비스 상태 (SSH, systemd)
+- 필수 디렉토리 및 파일 존재
+- Cloud-init 초기화 상태
+- SSH 키 설정
+- Docker/K3s 관련 확인
+- 시스템 건강 상태
+
+> **참고**: jq 등 외부 명령어 없이 기본 Linux 명령어만으로 점검합니다.
 
 ### 4단계: 클러스터 확인 및 WSL kubectl 설정
 
@@ -348,10 +388,42 @@ echo 'alias kubectl="kubectl --insecure-skip-tls-verify"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+#### 5단계: 실제 문제 해결 사례 (2024-12-19)
+
+사용자가 실제로 겪은 TLS 인증서 오류와 SSH 호스트 키 문제 해결 과정:
+
+```bash
+# 1. TLS 인증서 오류 발생
+export KUBECONFIG=~/.kube/config-k3s && kubectl get nodes
+# 결과: Unable to connect to the server: tls: failed to verify certificate: x509: certificate signed by unknown authority
+
+# 2. SSH 호스트 키 문제 해결 (VM 재생성 시 필요)
+ssh-keygen -f "/home/ubuntu/.ssh/known_hosts" -R "192.168.6.10"
+sed -i '/192.168.6.10/d' ~/.ssh/known_hosts
+
+# 3. 새로운 kubeconfig 파일 다운로드
+scp -o StrictHostKeyChecking=no -i ~/.ssh/airgap_k3s ubuntu@192.168.6.10:/etc/rancher/k3s/k3s.yaml ~/.kube/config-k3s
+
+# 4. 서버 주소 수정 (127.0.0.1 → 192.168.6.10)
+sed -i 's/127.0.0.1/192.168.6.10/g' ~/.kube/config-k3s
+
+# 5. 연결 테스트 성공
+export KUBECONFIG=~/.kube/config-k3s
+kubectl get nodes
+# 결과: 정상적으로 노드 목록 출력
+```
+
+**주요 해결 포인트:**
+- **SSH 호스트 키 초기화**: VM 재생성 시 기존 호스트 키 제거
+- **StrictHostKeyChecking=no**: 첫 연결 시 호스트 키 검증 건너뛰기
+- **서버 주소 수정**: k3s.yaml의 기본값 127.0.0.1을 실제 VM IP로 변경
+- **TLS 인증서**: k3s의 자체 서명 인증서는 포함된 CA로 검증됨
+
 ### 참고사항
 - k3s의 `k3s.yaml`에는 CA/클라이언트 인증서가 포함되어 있으므로 별도 인증서 설치가 필요 없습니다.
 - 시간 차이로 x509 오류가 나면 VM 부팅 시 자동 동기화되지만, 수동으로는 WSL에서 `wsl/scripts/sync-time-k3s.sh`를 실행하세요.
 - `02_wait_and_config.sh` 스크립트가 자동으로 WSL에서의 kubectl 접속도 검증합니다.
+- **VM 재생성 시 주의**: SSH 호스트 키가 변경되므로 known_hosts에서 해당 IP를 제거해야 합니다.
 
 ### TLS SAN 자동 설정 (인증서 오류 방지)
 
@@ -414,6 +486,14 @@ k3s server --tls-san 192.168.6.10 --tls-san 127.0.0.1 --tls-san localhost ...
   - `kubectl` 탐색을 최대 5분간 재시도
 - **콘솔 자동 로그인**: `tty1`/`ttyS0`에서 `ubuntu` 자동 로그인(SSH는 여전히 키 기반만 허용)
 
+### K8s 운영 패키지 설치 개선 (v2.3)
+- **의존성 패키지 자동 다운로드**: jq(libjq1), sysstat(libsensors5) 등 의존성 패키지들을 ISO 생성 시 자동으로 포함
+- **설치 순서 최적화**: 의존성 패키지를 먼저 설치한 후 주요 패키지 설치
+- **2단계 의존성 해결**: 1차(의존성 설치 후), 2차(주요 패키지 설치 후) 의존성 문제 해결
+- **설치 성공률 모니터링**: 설치 완료 후 성공률을 계산하여 마커 파일에 기록
+- **APT 설정 강화**: 인증되지 않은 패키지 설치 허용 및 다운그레이드 허용 설정 추가
+- **상세 로깅**: 설치 과정의 각 단계별 상세 로그 생성 및 journald 연동
+
 > 부팅 후 빠른 점검
 ```bash
 # 마스터
@@ -425,6 +505,73 @@ sudo /usr/local/bin/k3s kubectl get nodes -o wide || true
 sudo tail -n 200 /var/log/k3s-agent-bootstrap.log
 pgrep -a k3s || true
 ```
+
+## 🔍 VM 내부 패키지 설치 상태 점검
+
+VM 내부에서 K8s 운영 패키지(jq, htop, ethtool 등)가 제대로 설치되었는지 확인하고 문제를 진단할 수 있는 스크립트가 제공됩니다.
+
+### 점검 스크립트 사용법
+
+VM 내부에서 실행:
+
+```bash
+# 기본 점검
+sudo ./check-vm-packages.sh
+
+# 상세 출력과 함께 점검
+sudo ./check-vm-packages.sh --verbose
+
+# 자동 수정 시도
+sudo ./check-vm-packages.sh --auto-fix
+
+# 상세 보고서 생성
+sudo ./check-vm-packages.sh --report
+
+# 모든 옵션 사용
+sudo ./check-vm-packages.sh --verbose --auto-fix --report
+```
+
+### 수동 복구 스크립트 사용법
+
+패키지 설치에 문제가 있을 경우:
+
+```bash
+# 기본 복구 (확인 후 실행)
+sudo ./fix-vm-packages.sh
+
+# 강제 복구 (확인 없이 실행)
+sudo ./fix-vm-packages.sh --force
+
+# 상세 출력과 함께 복구
+sudo ./fix-vm-packages.sh --verbose
+
+# 백업 생성을 건너뛰고 복구
+sudo ./fix-vm-packages.sh --skip-backup
+```
+
+### 점검 항목
+
+1. **시스템 기본 정보**: OS, 커널, 메모리, 디스크 등
+2. **cloud-init 실행 상태**: 로그 파일, 완료 마커 확인
+3. **K8s 운영 패키지 서비스**: systemd 서비스 상태 점검
+4. **Seed 파일 및 패키지 디렉토리**: 설치 파일 존재 여부 확인
+5. **개별 패키지 설치 상태**: jq, htop, ethtool 등 8개 필수 패키지
+6. **dpkg 상태**: 패키지 관리자 상태 점검
+7. **네트워크 및 시스템 설정**: APT 소스, 서비스 상태 등
+8. **문제 진단**: 설치 실패 원인 분석 및 해결 방안 제시
+9. **자동 수정**: 간단한 문제 자동 해결 시도
+10. **결과 요약**: 설치 성공률 및 상세 보고서 생성
+
+### 복구 기능
+
+1. **사전 점검**: 권한, 디스크 공간 등 확인
+2. **백업 생성**: 기존 상태 보존
+3. **설치 파일 검증**: Seed 디렉토리, 압축 파일, 스크립트 확인
+4. **기존 설치 정리**: 이전 설치 상태 정리
+5. **패키지 설치 실행**: 수동 설치 스크립트 실행
+6. **설치 결과 확인**: 개별 패키지 설치 상태 검증
+7. **시스템 서비스 복구**: 관련 서비스 상태 복구
+8. **최종 점검**: 설치 성공률 및 보고서 생성
 
 > 검증 스크립트 실행 시 키 지정 예시
 ```bash
@@ -763,6 +910,31 @@ docker images --digests
 - **IP 대역**: 192.168.6.x (통일된 네트워크 설정)
 
 ## 🔧 최근 변경사항
+
+### 2024-12-19: k8s 운영 도구 설치 개선 및 CDROM 마운트 해제 로직 개선 (8차 수정)
+- **문제**: 
+  - k8s 운영에 필요한 command들이 deb 파일로 다운로드되었지만 VM에서 설치되지 않음
+  - CDROM 마운트 해제 시 cloud-init status가 done으로 완료되지 않아 계속 대기하는 상태
+- **해결**: 
+  - deb 파일들을 tar.gz로 압축하여 VM에 전달하는 로직 추가
+  - VM에서 tar.gz 압축 해제 및 자동 설치 스크립트 추가
+  - cloud-init 템플릿에 k8s 운영 패키지 설치 서비스 추가
+  - Setup-VMs.ps1의 Wait-ForISOCopy 로직 개선 (타임아웃 증가, 상태 체크 개선)
+  - 설치 완료 확인 로직 및 마커 파일 생성 추가
+- **포함된 도구**: jq, htop, ethtool, iproute2, dnsutils, telnet, psmisc, sysstat, iftop, iotop, dstat, yq
+- **영향**: k8s 운영 도구들이 정상적으로 설치되고, CDROM 마운트 해제가 정확한 시점에 수행됨
+- **파일**: `wsl/scripts/01_build_seed_isos.sh`, `wsl/templates/user-data-master.tpl`, `wsl/templates/user-data-worker.tpl`, `windows/Setup-VMs.ps1`
+
+### 2024-12-19: kubectl TLS 인증서 오류 해결 가이드 추가 (7차 수정)
+- **문제**: WSL에서 kubectl 접속 시 TLS 인증서 오류 및 SSH 호스트 키 문제 발생
+- **해결**: 
+  - 실제 사용자 사례 기반 문제 해결 과정 문서화
+  - SSH 호스트 키 초기화 방법 추가 (`ssh-keygen -R`, `sed -i '/IP/d'`)
+  - TLS 인증서 오류 해결 방법 상세 가이드
+  - VM 재생성 시 주의사항 및 해결책 추가
+- **문서**: README.md의 WSL kubectl 접속 가이드에 실제 문제 해결 사례 추가
+- **영향**: 사용자가 kubectl 접속 문제를 빠르게 해결할 수 있는 구체적인 가이드 제공
+- **파일**: `README.md`
 
 ### 2024-12-19: Airgapped 환경용 패키지 자동 포함 (6차 수정)
 - **문제**: Airgapped 환경에서 추가 유틸리티 패키지들이 필요하지만 네트워크 접근이 불가능한 상황

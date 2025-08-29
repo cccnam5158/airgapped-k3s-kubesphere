@@ -719,62 +719,166 @@ copy_additional_files() {
     local packages_dir="$files_dir/packages"
     mkdir -p "$packages_dir"
     
-    # 필요한 패키지 목록
+    # 필요한 패키지 목록 (Ubuntu 22.04 호환성 고려)
     local packages=(
         "jq"
+        "htop"
+        "ethtool"
+        "iproute2"
+        "dnsutils"  # dig 명령어 포함
+        "telnet"
+        "psmisc"
+        "sysstat"
+    )
+    
+    # 의존성 패키지 목록 (자동으로 포함)
+    local dependency_packages=(
+        "libjq1"      # jq 의존성
+        "libsensors5" # sysstat 의존성
+        "libsensors-config" # libsensors5 의존성
+        "libonig5"    # jq 의존성 (일부 버전)
+    )
+    
+    # 선택적 패키지 (있으면 다운로드, 없으면 건너뜀)
+    local optional_packages=(
         "iftop"
         "iotop"
         "dstat"
-        "sysstat"
-        "psmisc"
         "yq"
-        "iproute2"
-        "telnet"
-        "dnsutils"  # dig 명령어 포함
-        "htop"
-        "ethtool"
     )
     
-    # 패키지 다운로드
+    # 패키지 다운로드 (개선된 방식)
+    cd "$packages_dir"
+    
+    # 의존성 패키지 먼저 다운로드 (설치 순서 최적화)
+    log_info "의존성 패키지 다운로드 중..."
+    for package in "${dependency_packages[@]}"; do
+        log_info "의존성 패키지 다운로드 중: $package"
+        if apt-get download "$package" 2>/dev/null; then
+            log_success "의존성 패키지 다운로드 완료: $package"
+        else
+            log_warning "의존성 패키지 다운로드 실패: $package (건너뜀)"
+        fi
+    done
+    
+    # 필수 패키지 다운로드
+    log_info "필수 패키지 다운로드 중..."
     for package in "${packages[@]}"; do
         log_info "패키지 다운로드 중: $package"
-        if apt-get download "$package" -o APT::Get::Download-Only=true -o Dir::Cache="$packages_dir" 2>/dev/null; then
+        if apt-get download "$package" 2>/dev/null; then
             log_success "패키지 다운로드 완료: $package"
         else
             log_warning "패키지 다운로드 실패: $package (건너뜀)"
         fi
     done
     
-    # 다운로드된 .deb 파일들을 packages 디렉토리로 이동
-    if [[ -d "$packages_dir/archives" ]]; then
-        mv "$packages_dir/archives"/*.deb "$packages_dir/" 2>/dev/null || true
-        rmdir "$packages_dir/archives" 2>/dev/null || true
+    # 선택적 패키지 다운로드 (있으면 다운로드)
+    log_info "선택적 패키지 다운로드 중..."
+    for package in "${optional_packages[@]}"; do
+        log_info "선택적 패키지 다운로드 중: $package"
+        if apt-get download "$package" 2>/dev/null; then
+            log_success "선택적 패키지 다운로드 완료: $package"
+        else
+            log_info "선택적 패키지 다운로드 실패: $package (정상적인 상황)"
+        fi
+    done
+    
+    # 다운로드된 .deb 파일들 확인
+    local deb_count=$(ls -1 *.deb 2>/dev/null | wc -l)
+    if [[ $deb_count -gt 0 ]]; then
+        log_success "총 $deb_count개의 .deb 파일이 다운로드되었습니다"
+        ls -la *.deb
+    else
+        log_warning "다운로드된 .deb 파일이 없습니다"
     fi
     
-    # 패키지 설치 스크립트 생성
+    # deb 파일들을 tar.gz로 압축
+    log_info "deb 파일들을 tar.gz로 압축합니다..."
+    local deb_files=$(ls -1 *.deb 2>/dev/null | wc -l)
+    if [[ $deb_files -gt 0 ]]; then
+        tar -czf "k8s-ops-packages.tar.gz" *.deb
+        log_success "deb 파일들을 k8s-ops-packages.tar.gz로 압축 완료"
+        
+        # 압축 파일 크기 확인
+        local archive_size=$(du -h "k8s-ops-packages.tar.gz" | cut -f1)
+        log_info "압축 파일 크기: $archive_size"
+        
+        # 원본 deb 파일들 삭제 (압축 파일만 유지)
+        rm -f *.deb
+        log_info "원본 deb 파일들 삭제됨 (압축 파일만 유지)"
+    else
+        log_warning "압축할 deb 파일이 없습니다"
+        # 빈 tar.gz 파일 생성 (VM에서 오류 방지)
+        tar -czf "k8s-ops-packages.tar.gz" --files-from /dev/null
+        log_info "빈 k8s-ops-packages.tar.gz 파일 생성됨 (VM 호환성용)"
+    fi
+    
+    # 패키지 설치 스크립트 생성 (tar.gz 압축 해제 포함)
     cat > "$packages_dir/install-packages.sh" << 'EOF'
 #!/bin/bash
 # Airgapped 환경에서 패키지 설치 스크립트
 set -euo pipefail
 
-echo "Airgapped 환경에서 추가 패키지들을 설치합니다..."
+log() { echo "[install-packages] $1"; }
 
-# 현재 디렉토리의 .deb 파일들을 설치
-for deb_file in *.deb; do
+log "Airgapped 환경에서 추가 패키지들을 설치합니다..."
+
+# tar.gz 파일이 있으면 압축 해제
+if [[ -f "k8s-ops-packages.tar.gz" ]]; then
+    log "k8s-ops-packages.tar.gz 압축 해제 중..."
+    tar -xzf "k8s-ops-packages.tar.gz"
+    log "압축 해제 완료"
+fi
+
+# 설치 순서 최적화: 의존성 패키지 먼저 설치
+log "의존성 패키지 먼저 설치 중..."
+for deb_file in lib*.deb; do
     if [[ -f "$deb_file" ]]; then
-        echo "설치 중: $deb_file"
-        dpkg -i "$deb_file" || echo "설치 실패: $deb_file (의존성 문제일 수 있음)"
+        log "의존성 패키지 설치 중: $deb_file"
+        dpkg -i "$deb_file" || log "의존성 패키지 설치 실패: $deb_file"
     fi
 done
 
-# 의존성 문제 해결
-apt-get install -f -y || true
+# 의존성 문제 해결 (1차)
+log "1차 의존성 문제 해결 중..."
+apt-get install -f -y || log "1차 의존성 해결 실패"
 
-echo "패키지 설치 완료!"
+# 주요 패키지들 설치
+log "주요 패키지들 설치 중..."
+for deb_file in *.deb; do
+    if [[ -f "$deb_file" && ! "$deb_file" =~ ^lib ]]; then
+        log "패키지 설치 중: $deb_file"
+        dpkg -i "$deb_file" || log "패키지 설치 실패: $deb_file"
+    fi
+done
+
+# 의존성 문제 해결 (2차)
+log "2차 의존성 문제 해결 중..."
+apt-get install -f -y || log "2차 의존성 해결 실패"
+
+# 설치 완료 확인 및 마커 파일 생성
+log "설치된 패키지 확인 중..."
+dpkg -l | grep -E "(jq|htop|ethtool|iproute2|dnsutils|telnet|psmisc|sysstat|iftop|iotop|dstat|yq)" || log "설치된 패키지 없음"
+
+# 설치 성공률 계산
+total_packages=8
+installed_count=0
+for cmd in jq htop ethtool ip dnsutils telnet fuser iostat; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        installed_count=$((installed_count + 1))
+    fi
+done
+success_rate=$(( (installed_count * 100) / total_packages ))
+
+log "설치 성공률: $installed_count/$total_packages ($success_rate%)"
+
+# 설치 완료 마커 파일 생성
+echo "$(date): k8s 운영 패키지 설치 완료 (성공률: $success_rate%)" > /var/lib/k8s-ops-packages-installed
+log "패키지 설치 완료!"
 EOF
     chmod +x "$packages_dir/install-packages.sh"
     
-    log_success "Airgapped 환경용 패키지 준비 완료"
+    log_success "Airgapped 환경용 패키지 준비 완료 (tar.gz 압축 포함)"
     
     # WSL 기준 빌드 시각 기록 (부팅 시 초기 오프라인 시간 동기화에 사용)
     if command -v date &> /dev/null; then

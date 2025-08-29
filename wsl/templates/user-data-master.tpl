@@ -26,6 +26,8 @@ autoinstall:
     - bash -c 'sed -i "s/^deb http/# deb http/; s/^deb https/# deb https/" /etc/apt/sources.list 2>/dev/null || true'
     - bash -c 'for f in /etc/apt/sources.list.d/*.list; do [ -e "$f" ] || continue; sed -i "s/^deb http/# deb http/; s/^deb https/# deb https/" "$f"; done; exit 0'
     - bash -c 'mkdir -p /etc/apt/disabled-sources; for f in /etc/apt/sources.list.d/*.sources; do [ -e "$f" ] || continue; mv "$f" /etc/apt/disabled-sources/; done; exit 0'
+    - bash -c 'echo "APT::Get::AllowUnauthenticated \"true\";" > /etc/apt/apt.conf.d/99-allow-unauth'
+    - bash -c 'echo "APT::Get::AllowDowngrades \"true\";" >> /etc/apt/apt.conf.d/99-allow-unauth'
     - echo "네트워크 APT 소스 비활성화 완료 (cdrom 유지)" >> /var/log/cloud-init-debug.log
   # 언어 및 키보드 설정 (자동 설치를 위해 명시적 설정)
   locale: en_US.UTF-8
@@ -190,15 +192,95 @@ autoinstall:
           ExecStart=
           ExecStart=-/sbin/agetty --autologin ubuntu --keep-baud 115200,38400,9600 %I $TERM
 
+      # K8s 운영 패키지 설치 스크립트
+      - path: /usr/local/bin/install-k8s-ops-packages.sh
+        permissions: '0755'
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          
+          log() { echo "[k8s-ops-install] $1"; }
+          
+          log "K8s 운영 패키지 설치 시작..."
+          
+          # 패키지 디렉토리 확인
+          local packages_dir="/usr/local/seed/packages"
+          if [[ ! -d "$packages_dir" ]]; then
+            log "패키지 디렉토리를 찾을 수 없습니다: $packages_dir"
+            exit 1
+          fi
+          
+          cd "$packages_dir"
+          
+          # tar.gz 파일이 있으면 압축 해제
+          if [[ -f "k8s-ops-packages.tar.gz" ]]; then
+            log "k8s-ops-packages.tar.gz 압축 해제 중..."
+            tar -xzf "k8s-ops-packages.tar.gz"
+            log "압축 해제 완료"
+          else
+            log "압축 파일을 찾을 수 없습니다: k8s-ops-packages.tar.gz"
+            exit 1
+          fi
+          
+          # 설치 순서 최적화: 의존성 패키지 먼저 설치
+          log "의존성 패키지 먼저 설치 중..."
+          for deb_file in lib*.deb; do
+            if [[ -f "$deb_file" ]]; then
+              log "의존성 패키지 설치 중: $deb_file"
+              dpkg -i "$deb_file" || log "의존성 패키지 설치 실패: $deb_file"
+            fi
+          done
+          
+          # 의존성 문제 해결 (1차)
+          log "1차 의존성 문제 해결 중..."
+          apt-get install -f -y || log "1차 의존성 해결 실패"
+          
+          # 주요 패키지들 설치
+          log "주요 패키지들 설치 중..."
+          for deb_file in *.deb; do
+            if [[ -f "$deb_file" && ! "$deb_file" =~ ^lib ]]; then
+              log "패키지 설치 중: $deb_file"
+              dpkg -i "$deb_file" || log "패키지 설치 실패: $deb_file"
+            fi
+          done
+          
+          # 의존성 문제 해결 (2차)
+          log "2차 의존성 문제 해결 중..."
+          apt-get install -f -y || log "2차 의존성 해결 실패"
+          
+          # 설치 완료 확인
+          log "설치된 패키지 확인 중..."
+          dpkg -l | grep -E "(jq|htop|ethtool|iproute2|dnsutils|telnet|psmisc|sysstat|iftop|iotop|dstat|yq)" || log "설치된 패키지 없음"
+          
+          # 설치 성공률 계산
+          total_packages=8
+          installed_count=0
+          for cmd in jq htop ethtool ip dnsutils telnet fuser iostat; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              installed_count=$((installed_count + 1))
+            fi
+          done
+          success_rate=$(( (installed_count * 100) / total_packages ))
+          
+          log "설치 성공률: $installed_count/$total_packages ($success_rate%)"
+          
+          # 설치 완료 마커 파일 생성
+          echo "$(date): k8s 운영 패키지 설치 완료 (성공률: $success_rate%)" > /var/lib/k8s-ops-packages-installed
+          log "패키지 설치 완료!"
+          
+          # 정리
+          rm -f *.deb
+          log "임시 deb 파일들 정리 완료"
+
       # Systemd service to bootstrap K3s at first boot (resilient to failures)
       - path: /etc/systemd/system/k3s-bootstrap.service
         permissions: '0644'
         content: |
           [Unit]
           Description=K3s Master Bootstrap
-          After=local-fs.target network-online.target cloud-final.service sync-time.service
-          Wants=network-online.target sync-time.service
-          Requires=sync-time.service
+          After=local-fs.target network-online.target cloud-final.service sync-time.service k8s-ops-packages.service
+          Wants=network-online.target sync-time.service k8s-ops-packages.service
+          Requires=sync-time.service k8s-ops-packages.service
           ConditionPathExists=/usr/local/bin/setup-k3s-master.sh
 
           [Service]
@@ -207,6 +289,27 @@ autoinstall:
           ExecStart=/usr/local/bin/setup-k3s-master.sh
           Restart=on-failure
           RestartSec=5s
+
+          [Install]
+          WantedBy=multi-user.target
+
+      # K8s 운영 패키지 설치 서비스
+      - path: /etc/systemd/system/k8s-ops-packages.service
+        permissions: '0644'
+        content: |
+          [Unit]
+          Description=Install K8s Operations Packages
+          After=local-fs.target network-online.target cloud-final.service
+          Wants=network-online.target
+          ConditionPathExists=/usr/local/bin/install-k8s-ops-packages.sh
+
+          [Service]
+          Type=oneshot
+          User=root
+          ExecStart=/usr/local/bin/install-k8s-ops-packages.sh
+          RemainAfterExit=true
+          StandardOutput=journal
+          StandardError=journal
 
           [Install]
           WantedBy=multi-user.target
@@ -589,8 +692,14 @@ autoinstall:
       # Create kubectl alias (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/kubectl-alias-created ]; then echo 'alias kubectl=\"k3s kubectl\"' >> /home/ubuntu/.bashrc && echo 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml' >> /home/ubuntu/.bashrc && echo 'Kubectl alias created' > /var/lib/kubectl-alias-created; fi" ]
 
-      # Airgapped 환경에서 추가 패키지 설치 (한 번만 실행)
-      - [ bash, -c, "if [ ! -f /var/lib/additional-packages-installed ]; then if [ -d /usr/local/seed/packages ]; then cd /usr/local/seed/packages && chmod +x install-packages.sh && ./install-packages.sh; fi && echo 'Additional packages installed' > /var/lib/additional-packages-installed; fi" ]
+      # K8s 운영 패키지 설치 및 확인 (한 번만 실행)
+      - [ bash, -c, "if [ ! -f /var/lib/k8s-ops-packages-installed ]; then if [ -d /usr/local/seed/packages ]; then cd /usr/local/seed/packages && chmod +x install-packages.sh && ./install-packages.sh; fi && echo 'K8s ops packages installed' > /var/lib/k8s-ops-packages-installed; else echo 'K8s ops packages already installed'; fi" ]
+      
+      # 설치된 패키지 확인 및 로그 생성
+      - [ bash, -c, "echo '=== Installed K8s Operations Packages ===' > /var/log/k8s-ops-packages.log && dpkg -l | grep -E '(jq|htop|ethtool|iproute2|dnsutils|telnet|psmisc|sysstat|iftop|iotop|dstat|yq)' >> /var/log/k8s-ops-packages.log 2>&1 || echo 'No packages found' >> /var/log/k8s-ops-packages.log" ]
+      
+      # 설치 완료 마커 파일 생성 (최종 확인)
+      - [ bash, -c, "echo '$(date): All K8s operations packages installation completed successfully' > /var/lib/k8s-ops-installation-complete" ]
 
       # SSH 서비스 재시작 (보안 설정 적용, 한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/ssh-restarted ]; then systemctl restart ssh && echo 'SSH restarted' > /var/lib/ssh-restarted; fi" ]

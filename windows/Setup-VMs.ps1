@@ -464,20 +464,56 @@ try {
         # Wait for initial boot and then safely disconnect ISO to prevent reinstall loop
         Write-Info "Waiting for VMs to complete initial boot and file copy..."
         
-        # Function to wait for ISO copy completion
+        # Function to wait for ISO copy completion (improved version)
         function Wait-ForISOCopy {
             param(
                 [string]$VmxPath,
                 [string]$VmName,
-                [int]$MaxWaitMinutes = 15
+                [int]$MaxWaitMinutes = 30
             )
             
             Write-Info "Waiting for ISO file copy completion on $VmName (max $MaxWaitMinutes minutes)..."
             $startTime = Get-Date
             $timeout = $startTime.AddMinutes($MaxWaitMinutes)
+            $lastStatus = ""
             
             while ((Get-Date) -lt $timeout) {
                 try {
+                    # First, check if VM is responsive
+                    $vmStatus = & $script:VMRUN_PATH -T ws list 2>$null | Select-String $VmName
+                    if (-not $vmStatus) {
+                        Write-Warning "VM $VmName not found in running VMs list, waiting..."
+                        Start-Sleep -Seconds 30
+                        continue
+                    }
+                    
+                    # Wait for VM to be ready for guest operations (avoid authentication errors)
+                    $vmReady = $false
+                    $readyAttempts = 0
+                    while (-not $vmReady -and $readyAttempts -lt 10) {
+                        $readyAttempts++
+                        try {
+                            # Simple ping test to check if guest OS is ready
+                            $pingTest = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/echo" "test" 2>$null
+                            if ($LASTEXITCODE -eq 0) {
+                                $vmReady = $true
+                                Write-Info "VM $VmName is ready for guest operations"
+                            } else {
+                                Write-Info "VM $VmName not ready yet (attempt $readyAttempts/10), waiting..."
+                                Start-Sleep -Seconds 15
+                            }
+                        } catch {
+                            Write-Info "VM $VmName not ready yet (attempt $readyAttempts/10), waiting..."
+                            Start-Sleep -Seconds 15
+                        }
+                    }
+                    
+                    if (-not $vmReady) {
+                        Write-Warning "VM $VmName not ready for guest operations after 10 attempts, skipping this cycle"
+                        Start-Sleep -Seconds 30
+                        continue
+                    }
+                    
                     # Check if ISO copy completion file exists
                     $result = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/iso-copy-complete && echo 'COMPLETE' || echo 'INCOMPLETE'" 2>$null
                     
@@ -486,15 +522,45 @@ try {
                         return $true
                     }
                     
-                    # Check if VM is still booting (cloud-init in progress)
-                    $cloudInitStatus = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "cloud-init status 2>/dev/null | grep -E 'running|done' || echo 'BOOTING'" 2>$null
+                    # Check cloud-init status with better error handling
+                    $cloudInitStatus = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "cloud-init status 2>/dev/null || echo 'NOT_READY'" 2>$null
                     
+                    # Check for specific cloud-init states
                     if ($cloudInitStatus -like "*running*") {
-                        Write-Info "Cloud-init still running on $VmName, waiting..."
+                        if ($lastStatus -ne "running") {
+                            Write-Info "Cloud-init running on $VmName, waiting..."
+                            $lastStatus = "running"
+                        }
                     } elseif ($cloudInitStatus -like "*done*") {
-                        Write-Info "Cloud-init completed on $VmName, checking file copy..."
+                        if ($lastStatus -ne "done") {
+                            Write-Info "Cloud-init completed on $VmName, checking file copy..."
+                            $lastStatus = "done"
+                        }
+                    } elseif ($cloudInitStatus -like "*error*") {
+                        Write-Warning ("Cloud-init error on " + $VmName + ": " + $cloudInitStatus)
+                        $lastStatus = "error"
+                    } elseif ($cloudInitStatus -like "*NOT_READY*") {
+                        if ($lastStatus -ne "not_ready") {
+                            Write-Info "VM $VmName still booting (cloud-init not ready)..."
+                            $lastStatus = "not_ready"
+                        }
                     } else {
-                        Write-Info "VM $VmName still booting, waiting..."
+                        if ($lastStatus -ne "unknown") {
+                            Write-Info ("VM " + $VmName + " status: " + $cloudInitStatus)
+                            $lastStatus = "unknown"
+                        }
+                    }
+                    
+                    # Additional check: look for specific completion indicators
+                    $completionCheck = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "ls -la /usr/local/seed/ 2>/dev/null | wc -l || echo '0'" 2>$null
+                    if ($completionCheck -and $completionCheck -match '^\d+$' -and [int]$completionCheck -gt 0) {
+                        Write-Info "Seed files detected on $VmName, checking for completion..."
+                    }
+                    
+                    # Check if k8s packages installation is complete
+                    $k8sPackagesCheck = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/k8s-ops-packages-installed && echo 'PACKAGES_INSTALLED' || echo 'PACKAGES_NOT_READY'" 2>$null
+                    if ($k8sPackagesCheck -eq "PACKAGES_INSTALLED") {
+                        Write-Info "K8s packages installation completed on $VmName"
                     }
                     
                     Start-Sleep -Seconds 30
@@ -506,6 +572,7 @@ try {
             }
             
             Write-Warning "Timeout waiting for ISO copy completion on $VmName after $MaxWaitMinutes minutes"
+            Write-Info "Last known status: $lastStatus"
             return $false
         }
         
