@@ -263,41 +263,41 @@ generate_registries_config() {
     
     cat > "$OUTPUT_DIR/registries.yaml" << EOF
 mirrors:
-  "localhost:5000":
+  "192.168.6.1:5000":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "registry.k8s.io":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "docker.io":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "quay.io":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "gcr.io":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "kubesphere":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "prom":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "grafana":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "bitnami":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
   "rancher":
     endpoint:
-      - "https://localhost:5000"
+      - "https://192.168.6.1:5000"
 
 configs:
-  "localhost:5000":
+  "192.168.6.1:5000":
     tls:
-      ca_file: /etc/ssl/certs/airgap-registry-ca.crt
+      ca_file: /usr/local/share/ca-certificates/airgap-registry-ca.crt
       insecure_skip_verify: false
 EOF
     

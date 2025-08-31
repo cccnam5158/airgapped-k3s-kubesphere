@@ -2,6 +2,7 @@
 wsl/out/
 wsl/iso/
 wsl/registry/
+wsl/scripts/ops-packages/
 
 # Temporary files
 *.tmp
