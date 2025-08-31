@@ -10,7 +10,6 @@ graph TD
     D --> E[VM 생성 프로세스]
     E --> F[VM 부팅 및 설정]
     F --> G[완료]
-
     subgraph "setup-vms.ps1 (진입점)"
         B1[UTF-8 인코딩 설정]
         B2[환경 변수 설정]

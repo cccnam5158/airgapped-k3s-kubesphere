@@ -6,6 +6,15 @@ autoinstall:
     - systemctl stop ssh
     - echo "=== Cloud-init early-commands 시작 (Worker) ===" >> /var/log/cloud-init-debug.log
     - date >> /var/log/cloud-init-debug.log
+    - echo "네트워크 인터페이스 비활성화 중..." >> /var/log/cloud-init-debug.log
+    - systemctl stop networking 2>/dev/null || true
+    - ip link set dev eth0 down 2>/dev/null || true
+    - ip link set dev enp0s3 down 2>/dev/null || true
+    - ip link set dev ens33 down 2>/dev/null || true
+    - echo "네트워크 인터페이스 비활성화 완료" >> /var/log/cloud-init-debug.log
+    - echo "DNS 설정 비활성화 중..." >> /var/log/cloud-init-debug.log
+    - echo "nameserver 127.0.0.1" > /etc/resolv.conf
+    - echo "DNS 설정 비활성화 완료" >> /var/log/cloud-init-debug.log
     - echo "언어 설정 강제 적용 중..." >> /var/log/cloud-init-debug.log
     - bash -c 'echo "en_US.UTF-8 UTF-8" > /etc/locale.gen'
     - bash -c 'echo "LANG=en_US.UTF-8" > /etc/default/locale'
@@ -16,9 +25,17 @@ autoinstall:
     - |
       bash -c 'cat > /etc/apt/apt.conf.d/99-timeouts <<EOF
       Acquire::Retries "0";
-      Acquire::http::Timeout "3";
-      Acquire::https::Timeout "3";
+      Acquire::http::Timeout "1";
+      Acquire::https::Timeout "1";
+      Acquire::ftp::Timeout "1";
+      Acquire::cdrom::Timeout "1";
+      Acquire::gpgv::Timeout "1";
       Acquire::http::Pipeline-Depth "0";
+      Acquire::Languages "none";
+      Acquire::Check-Valid-Until "false";
+      Acquire::Check-Date "false";
+      Acquire::AllowInsecureRepositories "true";
+      Acquire::AllowDowngradeToInsecureRepositories "true";
       EOF'
     - echo "APT 타임아웃 설정 완료" >> /var/log/cloud-init-debug.log
     - echo "네트워크 APT 소스 비활성화(airgap) 진행... (cdrom 보존)" >> /var/log/cloud-init-debug.log
@@ -40,6 +57,28 @@ autoinstall:
   apt:
     geoip: false
     preserve_sources_list: true
+    
+  # Curtin 설정 최적화 (APT 지연 방지)
+  curtin:
+    apt:
+      geoip: false
+      preserve_sources_list: false
+    conf: |
+      Acquire::Retries "0";
+      Acquire::http::Timeout "1";
+      Acquire::https::Timeout "1";
+      Acquire::ftp::Timeout "1";
+      Acquire::cdrom::Timeout "1";
+      Acquire::gpgv::Timeout "1";
+      Acquire::http::Pipeline-Depth "0";
+      Acquire::Languages "none";
+      Acquire::Check-Valid-Until "false";
+      Acquire::Check-Date "false";
+      Acquire::AllowInsecureRepositories "true";
+      Acquire::AllowDowngradeToInsecureRepositories "true";
+    sources:
+      cdrom:
+        source: "deb [trusted=yes] file:/cdrom jammy main"
     
   # 인터랙티브 프롬프트 비활성화 (모든 섹션 비활성화)
   interactive-sections: []
@@ -126,8 +165,16 @@ autoinstall:
         permissions: '0644'
         content: |
           Acquire::Retries "0";
-          Acquire::http::Timeout "5";
-          Acquire::https::Timeout "5";
+          Acquire::http::Timeout "1";
+          Acquire::https::Timeout "1";
+          Acquire::ftp::Timeout "1";
+          Acquire::cdrom::Timeout "1";
+          Acquire::gpgv::Timeout "1";
+          Acquire::Languages "none";
+          Acquire::Check-Valid-Until "false";
+          Acquire::Check-Date "false";
+          Acquire::AllowInsecureRepositories "true";
+          Acquire::AllowDowngradeToInsecureRepositories "true";
 
       # CA certificate will be copied from CD by setup script to avoid YAML literal issues
 
@@ -183,7 +230,7 @@ autoinstall:
         content: |
           [Service]
           ExecStart=
-          ExecStart=-/sbin/agetty --autologin ubuntu --noclear %I $TERM
+          ExecStart=-/sbin/agetty --autologin ubuntu --noclear %I ${DOLLAR}TERM
 
       # Serial console auto-login on ttyS0 (matches kernel console=ttyS0)
       - path: /etc/systemd/system/serial-getty@ttyS0.service.d/override.conf
@@ -191,7 +238,7 @@ autoinstall:
         content: |
           [Service]
           ExecStart=
-          ExecStart=-/sbin/agetty --autologin ubuntu --keep-baud 115200,38400,9600 %I $TERM
+          ExecStart=-/sbin/agetty --autologin ubuntu --keep-baud 115200,38400,9600 %I ${DOLLAR}TERM
 
       # K8s 운영 패키지 설치 스크립트
       - path: /usr/local/bin/install-k8s-ops-packages.sh
@@ -568,7 +615,7 @@ autoinstall:
               echo "Master is reachable!"
               break
             fi
-            echo "Waiting for master... ($i/30)"
+            echo "Waiting for master... (${DOLLAR}i/30)"
             sleep 10
           done
           
@@ -643,7 +690,7 @@ autoinstall:
             if /usr/local/bin/k3s kubectl get nodes >/dev/null 2>&1; then
               break
             fi
-            echo "Waiting... ($i/30)"
+            echo "Waiting... (${DOLLAR}i/30)"
             sleep 10
           done
           

@@ -28,7 +28,8 @@ airgapped-k3s-kubesphere/
 │   │   ├── 01_build_seed_isos.sh # Ubuntu 22.04.5 기반 Seed ISO 생성
 │   │   ├── 02_wait_and_config.sh # 클러스터 확인 및 설정
 │   │   ├── check-vm-packages.sh # VM 내부 패키지 설치 상태 점검
-│   │   └── fix-vm-packages.sh   # VM 내부 패키지 설치 문제 수동 복구
+│   │   ├── fix-vm-packages.sh   # VM 내부 패키지 설치 문제 수동 복구
+│   │   └── ops-packages/        # K8s 운영 패키지 다운로드 디렉토리 (자동 생성)
 │   ├── templates/              # cloud-init 템플릿
 │   │   ├── user-data-master.tpl # 마스터 노드 템플릿
 │   │   └── user-data-worker.tpl # 워커 노드 템플릿
