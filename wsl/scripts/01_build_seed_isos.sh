@@ -837,11 +837,23 @@ log() { echo "[install-packages] $1"; }
 
 log "Airgapped 환경에서 추가 패키지들을 설치합니다..."
 
-# tar.gz 파일이 있으면 압축 해제
-if [[ -f "k8s-ops-packages.tar.gz" ]]; then
+# 패키지 디렉토리 확인 (고정 경로 사용)
+packages_dir="/usr/local/seed/packages"
+if [[ ! -d "$packages_dir" ]]; then
+    log "패키지 디렉토리 없음: $packages_dir (skip)"
+    exit 0
+fi
+
+cd "$packages_dir"
+
+# tar.gz 파일이 있으면 압축 해제 (없으면 스킵)
+if [[ -s "k8s-ops-packages.tar.gz" ]]; then
     log "k8s-ops-packages.tar.gz 압축 해제 중..."
     tar -xzf "k8s-ops-packages.tar.gz"
     log "압축 해제 완료"
+else
+    log "압축 파일 없음 또는 빈 파일 (skip)"
+    exit 0
 fi
 
 # 설치 순서 최적화: 의존성 패키지 먼저 설치
@@ -853,9 +865,12 @@ for deb_file in lib*.deb; do
     fi
 done
 
-# 의존성 문제 해결 (1차)
-log "1차 의존성 문제 해결 중..."
-apt-get install -f -y || log "1차 의존성 해결 실패"
+# 오프라인 고정 옵션 (sources 비활성화)
+APT_OFFLINE_OPTS='-o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=/dev/null -o APT::Get::List-Cleanup=0'
+
+# 의존성 문제 해결 (1차; 오프라인)
+log "1차 의존성 해결 (offline apt-get -f)"
+apt-get ${APT_OFFLINE_OPTS} -y install -f || log "1차 의존성 해결 실패(무시)"
 
 # 주요 패키지들 설치
 log "주요 패키지들 설치 중..."
@@ -866,11 +881,11 @@ for deb_file in *.deb; do
     fi
 done
 
-# 의존성 문제 해결 (2차)
-log "2차 의존성 문제 해결 중..."
-apt-get install -f -y || log "2차 의존성 해결 실패"
+# 의존성 문제 해결 (2차; 오프라인)
+log "2차 의존성 해결 (offline apt-get -f)"
+apt-get ${APT_OFFLINE_OPTS} -y install -f || log "2차 의존성 해결 실패(무시)"
 
-# 설치 완료 확인 및 마커 파일 생성
+# 설치 완료 확인
 log "설치된 패키지 확인 중..."
 dpkg -l | grep -E "(jq|htop|ethtool|iproute2|dnsutils|telnet|psmisc|sysstat|iftop|iotop|dstat|yq)" || log "설치된 패키지 없음"
 

@@ -264,7 +264,7 @@ autoinstall:
           
           log "K8s 운영 패키지 설치 시작..."
           
-          # 패키지 디렉토리 확인
+          # 패키지 디렉토리 확인 (고정 경로 사용)
           packages_dir="/usr/local/seed/packages"
           if [[ ! -d "$packages_dir" ]]; then
             log "패키지 디렉토리 없음: $packages_dir (skip)"
@@ -345,8 +345,7 @@ autoinstall:
           [Unit]
           Description=K3s Worker Bootstrap
           After=local-fs.target network-online.target cloud-final.service sync-time.service k8s-ops-packages.service
-          Wants=network-online.target sync-time.service k8s-ops-packages.service
-          Requires=sync-time.service k8s-ops-packages.service
+          Wants=network-online.target sync-time.service
           ConditionPathExists=/usr/local/bin/setup-k3s-worker.sh
 
           [Service]
@@ -369,7 +368,6 @@ autoinstall:
           After=local-fs.target network-online.target cloud-final.service
           Wants=network-online.target
           ConditionPathExists=/usr/local/bin/install-k8s-ops-packages.sh
-          ConditionPathExists=!/var/lib/k8s-ops-packages-installed
 
           [Service]
           Type=oneshot
@@ -581,32 +579,13 @@ autoinstall:
           
           echo "Starting K3s worker setup..."
           
-          # Prefer local seed copied during install; fallback to CD mount
-          SEED_BASE=""
-          if [ -d "/usr/local/seed" ]; then
-            SEED_BASE="/usr/local/seed"
-            echo "Using local seed at ${DOLLAR}{SEED_BASE}"
-          else
-            echo "Local seed not found, attempting to mount CD..."
-            mkdir -p /tmp/seed
-            mount /dev/sr0 /tmp/seed 2>/dev/null || mount /dev/cdrom /tmp/seed 2>/dev/null || mount /dev/scd0 /tmp/seed 2>/dev/null || true
-            if [ ! -d "/tmp/seed" ] || [ -z "$(ls -A /tmp/seed 2>/dev/null)" ]; then
-              echo "Warning: CD-ROM mount failed or empty"
-              ls -la /dev/sr* /dev/cd* /dev/scd* 2>/dev/null || echo "No CD-ROM devices found"
-            else
-              echo "CD-ROM mounted successfully:"
-              ls -la /tmp/seed/
-              SEED_BASE="/tmp/seed"
-              if [ -d "/tmp/seed/files" ]; then
-                SEED_BASE="/tmp/seed/files"
-              fi
-            fi
-          fi
+          # Set SEED_BASE directly (fixed variable assignment)
+          SEED_BASE="/usr/local/seed"
           
           # Copy k3s binary
-          if [ -f "${DOLLAR}{SEED_BASE}/k3s" ] || ls -1 "${DOLLAR}{SEED_BASE}"/k3s* >/dev/null 2>&1; then
-            if [ -f "${DOLLAR}{SEED_BASE}/k3s" ]; then SRC="${DOLLAR}{SEED_BASE}/k3s"; else SRC=$(ls -1 "${DOLLAR}{SEED_BASE}"/k3s* 2>/dev/null | head -n1); fi
-            install -m 0755 "${DOLLAR}{SRC}" /usr/local/bin/k3s
+          if [ -f "$SEED_BASE/k3s" ] || ls -1 "$SEED_BASE"/k3s* >/dev/null 2>&1; then
+            if [ -f "$SEED_BASE/k3s" ]; then SRC="$SEED_BASE/k3s"; else SRC=$(ls -1 "$SEED_BASE"/k3s* 2>/dev/null | head -n1); fi
+            install -m 0755 "$SRC" /usr/local/bin/k3s
             echo "K3s binary copied successfully"
           else
             echo "Error: k3s binary not found in seed"
@@ -615,14 +594,14 @@ autoinstall:
           
           # Copy registry configuration
           mkdir -p /etc/rancher/k3s
-          if [ -f "${DOLLAR}{SEED_BASE}/registries.yaml" ]; then
-            install -m 0644 "${DOLLAR}{SEED_BASE}/registries.yaml" /etc/rancher/k3s/registries.yaml
+          if [ -f "$SEED_BASE/registries.yaml" ]; then
+            install -m 0644 "$SEED_BASE/registries.yaml" /etc/rancher/k3s/registries.yaml
             echo "Registry configuration copied"
           fi
           
           # Copy CA certificate
-          if [ -f "${DOLLAR}{SEED_BASE}/airgap-registry-ca.crt" ]; then
-            install -m 0644 "${DOLLAR}{SEED_BASE}/airgap-registry-ca.crt" /usr/local/share/ca-certificates/airgap-registry-ca.crt
+          if [ -f "$SEED_BASE/airgap-registry-ca.crt" ]; then
+            install -m 0644 "$SEED_BASE/airgap-registry-ca.crt" /usr/local/share/ca-certificates/airgap-registry-ca.crt
             echo "CA certificate copied"
             # Refresh CA trust store immediately
             update-ca-certificates || true
@@ -635,7 +614,7 @@ autoinstall:
               echo "Master is reachable!"
               break
             fi
-            echo "Waiting for master... (${DOLLAR}i/30)"
+            echo "Waiting for master... ($i/30)"
             sleep 10
           done
           
@@ -696,9 +675,9 @@ autoinstall:
           systemctl enable --now eject-cdrom.service || true
           
           # Load airgap images after agent up (containerd)
-          if [ -f "${DOLLAR}{SEED_BASE}/k3s-airgap-images-amd64.tar.gz" ]; then
+          if [ -f "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" ]; then
             echo "Loading airgap images..."
-            /usr/local/bin/k3s ctr images import "${DOLLAR}{SEED_BASE}/k3s-airgap-images-amd64.tar.gz" || echo "Image import skipped/failed"
+            /usr/local/bin/k3s ctr images import "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" || echo "Image import skipped/failed"
             echo "Airgap images load step completed"
           else
             echo "Warning: Airgap images not found"
@@ -710,7 +689,7 @@ autoinstall:
             if /usr/local/bin/k3s kubectl get nodes >/dev/null 2>&1; then
               break
             fi
-            echo "Waiting... (${DOLLAR}i/30)"
+            echo "Waiting... ($i/30)"
             sleep 10
           done
           
@@ -749,7 +728,7 @@ autoinstall:
       - [ bash, -c, "if [ ! -f /var/lib/kernel-modules-loaded ]; then modprobe overlay && modprobe br_netfilter && echo 'Kernel modules loaded' > /var/lib/kernel-modules-loaded; fi" ]
 
       # Run worker bootstrap only if not already completed (idempotency)
-      - [ bash, -c, "if [ ! -f /var/lib/k3s-agent-bootstrap.done ]; then systemctl daemon-reload && sed -i 's/\\r$//' /usr/local/bin/setup-k3s-worker.sh /etc/systemd/system/k3s-agent-bootstrap.service 2>/dev/null || true && bash -x /usr/local/bin/setup-k3s-worker.sh | tee -a /var/log/k3s-agent-bootstrap.log && systemctl enable k3s-agent-bootstrap.service; else echo 'K3s agent bootstrap already completed, skipping'; fi" ]
+      - [ bash, -c, "if [ ! -f /var/lib/k3s-agent-bootstrap.done ]; then systemctl daemon-reload && sed -i 's/\\r$//' /usr/local/bin/setup-k3s-worker.sh /etc/systemd/system/k3s-agent-bootstrap.service 2>/dev/null || true && systemctl enable k3s-agent-bootstrap.service && systemctl start k3s-agent-bootstrap.service; else echo 'K3s agent bootstrap already completed, skipping'; fi" ]
 
       # Apply auto-login overrides (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/autologin-configured ]; then systemctl restart getty@tty1.service && systemctl restart serial-getty@ttyS0.service && echo 'Auto-login configured' > /var/lib/autologin-configured; fi" ]
@@ -757,7 +736,7 @@ autoinstall:
       # Create kubectl alias (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/kubectl-alias-created ]; then echo 'alias kubectl=\"k3s kubectl\"' >> /home/ubuntu/.bashrc && echo 'Kubectl alias created' > /var/lib/kubectl-alias-created; fi" ]
 
-      # K8s 운영 패키지 설치 서비스 활성화 및 실행 (idempotent)
+      # K8s 운영 패키지 설치 서비스 활성화 및 실행 (순차적 실행)
       - [ bash, -c, "systemctl daemon-reload && systemctl enable k8s-ops-packages.service && systemctl start k8s-ops-packages.service" ]
       
       # 설치된 패키지 확인 및 로그 생성

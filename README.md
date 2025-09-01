@@ -1007,6 +1007,25 @@ docker images --digests
   - Job 기반 비동기 실행으로 무한 대기 방지
 - **영향**: VM 생성 후 준비 상태 확인 기능 정상화, 스크립트 진행 중단 문제 해결
 
+### 250901 - vmrun 인증 플래그 순서 및 부트스트랩 실행 방식 변경 (중요)
+- **문제**: `vmrun` 인증 플래그가 `runProgramInGuest` 뒤에 배치되어 게스트 명령 실패 → 준비/완료 상태 체크 불가
+- **해결**: `windows/Setup-VMs.ps1`에서 인증 플래그를 명령 앞에 위치하도록 수정 (모든 호출 경로)
+- **변경**: `wsl/templates/user-data-master.tpl`의 runcmd에서 부트스트랩 스크립트 직접 실행을 제거하고, systemd 서비스(`k3s-bootstrap.service`)만 사용하도록 변경
+- **참고 명령 (올바른 예시)**:
+  ```
+  vmrun -T ws -gu <guestUser> -gp <guestPassword> runProgramInGuest "C:\path\vm.vmx" "/bin/echo" test
+  ```
+- **영향**: 게스트 명령 실행 안정화, 중복 실행 방지로 k3s 기동 타이밍 개선
+
+### 250901 - Netplan nameservers YAML 시퀀스 정비
+- **변경**: `user-data-master.tpl`에서 `nameservers.addresses`를 블록 시퀀스로 변경
+- **예시**:
+  ```yaml
+  nameservers:
+    addresses:
+      - ${DNS_IP}
+  ```
+
 ## 🎯 다음 단계
 
 1. VM 생성 및 k3s 설치 (자동화됨)
@@ -1057,3 +1076,22 @@ docker images | grep k3s
 ---
 
 **🎉 모든 설정이 완료되었습니다! 이제 Airgapped Lab을 사용할 수 있습니다.**
+
+### 250901 - 자동화 개선 및 문제 해결 완료 (중요)
++- **해결된 문제들**:
++  - SEED_BASE 변수 설정 문제 → 고정 경로 `/usr/local/seed` 사용
++  - ops 패키지 설치 스크립트 경로 문제 → 고정 경로 및 오프라인 설치 지원
++  - 워커 노드 레지스트리 설정 문제 → CA 인증서 및 registries.yaml 자동 복사
++  - vmrun 인증 플래그 순서 문제 → Windows 스크립트에서 수정 완료
++  - 서비스 의존성 문제 → k3s-bootstrap.service와 k8s-ops-packages.service 간의 강제 의존성 제거
++  - vmrun 인증 플래그 중복 문제 → Test-VMRunGuestSyntax 및 Wait-ForVMReady 함수에서 인증 플래그 중복 제거
++- **자동화된 기능들**:
++  - k3s 바이너리 자동 복사 및 설치
++  - 레지스트리 설정 자동 복사
++  - ops 패키지 자동 설치 (tar.gz 압축 해제 포함)
++  - 워커 노드 자동 조인
++  - airgap 이미지 자동 임포트
++  - 서비스 순차 실행 (ops 패키지 설치 후 k3s 부트스트랩)
++  - VM 준비 상태 확인 (vmrun 명령어 구문 오류 해결)
++- **수정된 파일들**: `user-data-master.tpl`, `user-data-worker.tpl`, `01_build_seed_isos.sh`, `Setup-VMs.ps1`
++- **영향**: 완전 자동화된 VM 및 k3s 클러스터 생성, 수동 개입 불필요

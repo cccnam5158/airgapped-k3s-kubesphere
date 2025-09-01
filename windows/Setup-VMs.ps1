@@ -71,14 +71,14 @@ function Test-VMRunGuestSyntax {
     
     # Test different authentication syntaxes - credentials must come BEFORE runProgramInGuest
     $syntaxes = @(
-        @{ Name = "NewStyle"; Args = @("-T", "ws", "-gu", $script:GuestUser, "-gp", $script:GuestPassword, "runProgramInGuest", $VmxPath) },
-        @{ Name = "OldStyle"; Args = @("-T", "ws", "-guestUser", $script:GuestUser, "-guestPassword", $script:GuestPassword, "runProgramInGuest", $VmxPath) }
+        @{ Name = "NewStyle"; Args = @("-T", "ws", "-gu", $script:GuestUser, "-gp", $script:GuestPassword) },
+        @{ Name = "OldStyle"; Args = @("-T", "ws", "-guestUser", $script:GuestUser, "-guestPassword", $script:GuestPassword) }
     )
     
     foreach ($syntax in $syntaxes) {
         Write-Info "Testing $($syntax.Name) syntax..."
         try {
-            $args = $syntax.Args + @("/bin/echo", "test")
+            $args = $syntax.Args + @("runProgramInGuest", $VmxPath, "/bin/echo", "test")
             
             # Add timeout to prevent infinite waiting
             $job = Start-Job -ScriptBlock {
@@ -445,14 +445,14 @@ function Wait-ForVMReady {
                     $args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword, "runProgramInGuest", $vmxPath, "/bin/echo", "test")
                     $result = & $vmrunPath @args 2>&1
                     if ($LASTEXITCODE -eq 0 -and $result -match "test") {
-                        return @{ Name = "NewStyle"; Args = @("-gu", $guestUser, "-gp", $guestPassword) }
+                        return @{ Name = "NewStyle"; Args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword) }
                     }
                     
                     # Test OldStyle syntax
                     $args = @("-T", "ws", "-guestUser", $guestUser, "-guestPassword", $guestPassword, "runProgramInGuest", $vmxPath, "/bin/echo", "test")
                     $result = & $vmrunPath @args 2>&1
                     if ($LASTEXITCODE -eq 0 -and $result -match "test") {
-                        return @{ Name = "OldStyle"; Args = @("-guestUser", $guestUser, "-guestPassword", $guestPassword) }
+                        return @{ Name = "OldStyle"; Args = @("-T", "ws", "-guestUser", $guestUser, "-guestPassword", $guestPassword) }
                     }
                     
                     return $null
@@ -492,7 +492,8 @@ function Wait-ForVMReady {
             if ($guestSyntax) {
                 Write-Info "Testing guest connectivity on $VmName..."
                 try {
-                    $args = @("-T", "ws", "runProgramInGuest", $VmxPath) + $guestSyntax['Args'] + @("/bin/echo", "test")
+                    # Auth flags must come before runProgramInGuest
+                    $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/echo", "test")
                     $testResult = & $script:VMRUN_PATH @args 2>&1
                     
                     if ($LASTEXITCODE -eq 0 -and $testResult -match "test") {
@@ -551,14 +552,16 @@ function Check-CompletionStatus {
         }
         
         # Try to run a simple test first
-        $args = @("-T", "ws", "runProgramInGuest", $VmxPath) + $guestSyntax['Args'] + @("/bin/echo", "connection_test")
+        # Auth flags must precede the runProgramInGuest command
+        $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/echo", "connection_test")
         $testResult = & $script:VMRUN_PATH @args 2>&1
         
         if ($LASTEXITCODE -eq 0 -and $testResult -match "connection_test") {
             Write-Success "Guest connectivity confirmed for ${VmName}"
             
             # Now check for completion indicators
-            $args = @("-T", "ws", "runProgramInGuest", $VmxPath) + $guestSyntax['Args'] + @("/bin/bash", "-c", "test -f /var/lib/iso-copy-complete && echo 'COPY_COMPLETE' || echo 'COPY_INCOMPLETE'")
+            # Keep auth flags before the command
+            $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/bash", "-c", "test -f /var/lib/iso-copy-complete && echo 'COPY_COMPLETE' || echo 'COPY_INCOMPLETE'")
             $completionResult = & $script:VMRUN_PATH @args 2>&1
             
             if ($completionResult -match "COPY_COMPLETE") {
