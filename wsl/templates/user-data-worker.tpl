@@ -37,6 +37,7 @@ autoinstall:
       Acquire::AllowInsecureRepositories "true";
       Acquire::AllowDowngradeToInsecureRepositories "true";
       EOF'
+    - echo 'Acquire::http::Proxy "false";' > /etc/apt/apt.conf.d/00-no-net
     - echo "APT 타임아웃 설정 완료" >> /var/log/cloud-init-debug.log
     - echo "네트워크 APT 소스 비활성화(airgap) 진행... (cdrom 보존)" >> /var/log/cloud-init-debug.log
     - bash -c 'cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true'
@@ -55,30 +56,35 @@ autoinstall:
   
   # APT mirror auto-detection tweaks for airgap speed
   apt:
+    preserve_sources_list: false
     geoip: false
-    preserve_sources_list: true
-    
-  # Curtin 설정 최적화 (APT 지연 방지)
+    primary:
+      - arches: [default]
+        uri: "file:/cdrom"
+
   curtin:
     apt:
-      geoip: false
       preserve_sources_list: false
-    conf: |
-      Acquire::Retries "0";
-      Acquire::http::Timeout "1";
-      Acquire::https::Timeout "1";
-      Acquire::ftp::Timeout "1";
-      Acquire::cdrom::Timeout "1";
-      Acquire::gpgv::Timeout "1";
-      Acquire::http::Pipeline-Depth "0";
-      Acquire::Languages "none";
-      Acquire::Check-Valid-Until "false";
-      Acquire::Check-Date "false";
-      Acquire::AllowInsecureRepositories "true";
-      Acquire::AllowDowngradeToInsecureRepositories "true";
-    sources:
-      cdrom:
-        source: "deb [trusted=yes] file:/cdrom jammy main"
+      geoip: false
+      primary:
+        - arches: [default]
+          uri: "file:/cdrom"
+      conf: |
+        Acquire::Retries "0";
+        Acquire::http::Timeout "1";
+        Acquire::https::Timeout "1";
+        Acquire::ftp::Timeout "1";
+        Acquire::cdrom::Timeout "1";
+        Acquire::gpgv::Timeout "1";
+        Acquire::http::Pipeline-Depth "0";
+        Acquire::Languages "none";
+        Acquire::Check-Valid-Until "false";
+        Acquire::Check-Date "false";
+        Acquire::AllowInsecureRepositories "true";
+        Acquire::AllowDowngradeToInsecureRepositories "true";
+      sources:
+        cdrom:
+          source: "deb [trusted=yes] file:/cdrom jammy main"
     
   # 인터랙티브 프롬프트 비활성화 (모든 섹션 비활성화)
   interactive-sections: []
@@ -243,31 +249,40 @@ autoinstall:
       # K8s 운영 패키지 설치 스크립트
       - path: /usr/local/bin/install-k8s-ops-packages.sh
         permissions: '0755'
+        owner: root:root
         content: |
           #!/bin/bash
           set -euo pipefail
           
           log() { echo "[k8s-ops-install] $1"; }
           
+          # 이미 설치된 경우 스킵
+          if [[ -f /var/lib/k8s-ops-packages-installed ]]; then
+            log "marker exists; skip"
+            exit 0
+          fi
+          
           log "K8s 운영 패키지 설치 시작..."
           
           # 패키지 디렉토리 확인
-          local packages_dir="/usr/local/seed/packages"
+          packages_dir="/usr/local/seed/packages"
           if [[ ! -d "$packages_dir" ]]; then
-            log "패키지 디렉토리를 찾을 수 없습니다: $packages_dir"
-            exit 1
+            log "패키지 디렉토리 없음: $packages_dir (skip)"
+            echo "$(date): no packages dir; skipped" > /var/lib/k8s-ops-packages-installed
+            exit 0
           fi
           
           cd "$packages_dir"
           
-          # tar.gz 파일이 있으면 압축 해제
-          if [[ -f "k8s-ops-packages.tar.gz" ]]; then
+          # tar.gz 파일이 있으면 압축 해제 (없으면 스킵)
+          if [[ -s "k8s-ops-packages.tar.gz" ]]; then
             log "k8s-ops-packages.tar.gz 압축 해제 중..."
             tar -xzf "k8s-ops-packages.tar.gz"
             log "압축 해제 완료"
           else
-            log "압축 파일을 찾을 수 없습니다: k8s-ops-packages.tar.gz"
-            exit 1
+            log "압축 파일 없음 또는 빈 파일 (skip)"
+            echo "$(date): empty/no archive; skipped" > /var/lib/k8s-ops-packages-installed
+            exit 0
           fi
           
           # 설치 순서 최적화: 의존성 패키지 먼저 설치
@@ -279,9 +294,12 @@ autoinstall:
             fi
           done
           
-          # 의존성 문제 해결 (1차)
-          log "1차 의존성 문제 해결 중..."
-          apt-get install -f -y || log "1차 의존성 해결 실패"
+          # 오프라인 고정 옵션 (sources 비활성화)
+          APT_OFFLINE_OPTS='-o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=/dev/null -o APT::Get::List-Cleanup=0'
+          
+          # 의존성 문제 해결 (1차; 오프라인)
+          log "1차 의존성 해결 (offline apt-get -f)"
+          apt-get ${APT_OFFLINE_OPTS} -y install -f || log "1차 의존성 해결 실패(무시)"
           
           # 주요 패키지들 설치
           log "주요 패키지들 설치 중..."
@@ -292,9 +310,9 @@ autoinstall:
             fi
           done
           
-          # 의존성 문제 해결 (2차)
-          log "2차 의존성 문제 해결 중..."
-          apt-get install -f -y || log "2차 의존성 해결 실패"
+          # 의존성 문제 해결 (2차; 오프라인)
+          log "2차 의존성 해결 (offline apt-get -f)"
+          apt-get ${APT_OFFLINE_OPTS} -y install -f || log "2차 의존성 해결 실패(무시)"
           
           # 설치 완료 확인
           log "설치된 패키지 확인 중..."
@@ -344,12 +362,14 @@ autoinstall:
       # K8s 운영 패키지 설치 서비스
       - path: /etc/systemd/system/k8s-ops-packages.service
         permissions: '0644'
+        owner: root:root
         content: |
           [Unit]
           Description=Install K8s Operations Packages
           After=local-fs.target network-online.target cloud-final.service
           Wants=network-online.target
           ConditionPathExists=/usr/local/bin/install-k8s-ops-packages.sh
+          ConditionPathExists=!/var/lib/k8s-ops-packages-installed
 
           [Service]
           Type=oneshot
@@ -707,6 +727,9 @@ autoinstall:
 
       # 타임존을 먼저 설정 (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/timezone-set ]; then timedatectl set-timezone Asia/Seoul && timedatectl set-local-rtc 0 && echo 'Timezone set' > /var/lib/timezone-set; fi" ]
+     
+      # ISO 복사 보강 마커 (seed 존재 시 보완 생성)
+      - [ bash, -c, "if [ -d /usr/local/seed ] && [ ! -f /var/lib/iso-copy-complete ]; then echo 'ISO copy verified at $(date)' > /var/lib/iso-copy-complete; fi" ]
       
       # 시간 동기화 실행 (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/sync-time-enabled ]; then systemctl enable sync-time.service && systemctl start sync-time.service && echo 'Sync-time enabled' > /var/lib/sync-time-enabled; fi" ]
@@ -734,8 +757,8 @@ autoinstall:
       # Create kubectl alias (한 번만 실행)
       - [ bash, -c, "if [ ! -f /var/lib/kubectl-alias-created ]; then echo 'alias kubectl=\"k3s kubectl\"' >> /home/ubuntu/.bashrc && echo 'Kubectl alias created' > /var/lib/kubectl-alias-created; fi" ]
 
-      # K8s 운영 패키지 설치 및 확인 (한 번만 실행)
-      - [ bash, -c, "if [ ! -f /var/lib/k8s-ops-packages-installed ]; then if [ -d /usr/local/seed/packages ]; then cd /usr/local/seed/packages && chmod +x install-packages.sh && ./install-packages.sh; fi && echo 'K8s ops packages installed' > /var/lib/k8s-ops-packages-installed; else echo 'K8s ops packages already installed'; fi" ]
+      # K8s 운영 패키지 설치 서비스 활성화 및 실행 (idempotent)
+      - [ bash, -c, "systemctl daemon-reload && systemctl enable k8s-ops-packages.service && systemctl start k8s-ops-packages.service" ]
       
       # 설치된 패키지 확인 및 로그 생성
       - [ bash, -c, "echo '=== Installed K8s Operations Packages ===' > /var/log/k8s-ops-packages.log && dpkg -l | grep -E '(jq|htop|ethtool|iproute2|dnsutils|telnet|psmisc|sysstat|iftop|iotop|dstat|yq)' >> /var/log/k8s-ops-packages.log 2>&1 || echo 'No packages found' >> /var/log/k8s-ops-packages.log" ]

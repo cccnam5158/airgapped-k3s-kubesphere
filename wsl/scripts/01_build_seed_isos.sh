@@ -620,7 +620,7 @@ modify_grub_config() {
     gsub(/[[:space:]]+autoinstall[^-]*$/, "", line)
     # GRUB에서 ; 는 명령 구분자이므로 반드시 이스케이프 필요
     # locale/keyboard 커널 파라미터를 함께 주입하여 초기 언어 선택 프롬프트를 차단
-    param=" autoinstall ds=nocloud\\;s=/cdrom/autoinstall/ locale=en_US.UTF-8 keyboard-configuration/layoutcode=us console-setup/ask_detect=false console=ttyS0,115200 console=tty0"
+    param=" autoinstall ds=nocloud\\;s=/cdrom/autoinstall/ apt-mirror=none locale=en_US.UTF-8 keyboard-configuration/layoutcode=us console-setup/ask_detect=false console=ttyS0,115200 console=tty0"
     pos=index(line, " ---")
     if (pos > 0) {
     before=substr(line, 1, pos-1)
@@ -667,7 +667,7 @@ modify_isolinux_config() {
     
     # isolinux.cfg 내 append 라인에 커널 파라미터 추가
     local new_content
-    new_content=$(sed 's|^\( *append .*$\)|\1 autoinstall ds=nocloud;s=/cdrom/autoinstall/ console=ttyS0,115200 console=tty0|' "$isolinux_cfg")
+    new_content=$(sed 's|^\( *append .*$\)|\1 autoinstall ds=nocloud;s=/cdrom/autoinstall/ apt-mirror=none console=ttyS0,115200 console=tty0|' "$isolinux_cfg")
     echo "$new_content" > "$isolinux_cfg" || { cp "$isolinux_cfg.backup" "$isolinux_cfg"; log_warning "isolinux 설정 수정 실패"; }
     
     if grep -q "autoinstall" "$isolinux_cfg"; then
@@ -685,7 +685,7 @@ modify_isolinux_config() {
     log_info "isolinux txt.cfg 발견됨"
     cp "$txt_cfg" "$txt_cfg.backup"
     local new_txt
-    new_txt=$(sed 's|^\( *append .*$\)|\1 autoinstall ds=nocloud;s=/cdrom/autoinstall/ console=ttyS0,115200 console=tty0|' "$txt_cfg")
+    new_txt=$(sed 's|^\( *append .*$\)|\1 autoinstall ds=nocloud;s=/cdrom/autoinstall/ apt-mirror=none console=ttyS0,115200 console=tty0|' "$txt_cfg")
     echo "$new_txt" > "$txt_cfg" || { cp "$txt_cfg.backup" "$txt_cfg"; log_warning "txt.cfg 수정 실패"; }
     grep -n "autoinstall" "$txt_cfg" || log_warning "txt.cfg에 autoinstall 미반영"
     fi
@@ -891,6 +891,11 @@ echo "$(date): k8s 운영 패키지 설치 완료 (성공률: $success_rate%)" >
 log "패키지 설치 완료!"
 EOF
     chmod +x "$packages_dir/install-packages.sh"
+
+    # Provide a consistently named helper (matches service naming convention)
+    cp "$packages_dir/install-packages.sh" "$packages_dir/install-k8s-ops-packages.sh" 2>/dev/null || true
+    chmod +x "$packages_dir/install-k8s-ops-packages.sh" 2>/dev/null || true
+    log_info "보조 설치 스크립트 생성: install-k8s-ops-packages.sh (install-packages.sh 복제)"
     
     # 작업 디렉토리를 원래 위치로 복원
     cd "$(dirname "$0")"

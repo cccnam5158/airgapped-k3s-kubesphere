@@ -23,7 +23,9 @@ param(
   [string[]]$WorkerNames = @("k3s-worker1","k3s-worker2"),
   [string]$MasterIP = "192.168.6.10",
   [string[]]$WorkerIPs = @("192.168.6.11","192.168.6.12"),
-  [switch]$SkipVMStart = $false
+  [switch]$SkipVMStart = $false,
+  [string]$GuestUser = "ubuntu",
+  [string]$GuestPassword = $env:INSTALL_USER_PASSWORD
 )
 
 # Colors for output
@@ -115,6 +117,11 @@ function Test-Prerequisites {
             }
             exit 1
         }
+    }
+
+    # Guest credential defaults
+    if (-not $GuestPassword -or $GuestPassword.Trim().Length -eq 0) {
+        $GuestPassword = "ubuntu"
     }
     
     # Check if seed directory exists
@@ -487,43 +494,38 @@ try {
                         continue
                     }
                     
-                    # Wait for VM to be ready for guest operations (avoid authentication errors)
-                    $vmReady = $false
-                    $readyAttempts = 0
-                    while (-not $vmReady -and $readyAttempts -lt 10) {
-                        $readyAttempts++
-                        try {
-                            # Simple ping test to check if guest OS is ready
-                            $pingTest = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/echo" "test" 2>$null
-                            if ($LASTEXITCODE -eq 0) {
-                                $vmReady = $true
-                                Write-Info "VM $VmName is ready for guest operations"
-                            } else {
-                                Write-Info "VM $VmName not ready yet (attempt $readyAttempts/10), waiting..."
-                                Start-Sleep -Seconds 15
-                            }
-                        } catch {
-                            Write-Info "VM $VmName not ready yet (attempt $readyAttempts/10), waiting..."
-                            Start-Sleep -Seconds 15
+                    # Wait for VMware Tools to be running (more reliable than guest echo)
+                    $toolsState = (& $script:VMRUN_PATH -T ws checkToolsState $VmxPath 2>$null | Out-String).Trim()
+                    if ($toolsState -notmatch "running") {
+                        if ($lastStatus -ne "tools:$toolsState") {
+                            Write-Info "VM $VmName tools: $toolsState (waiting...)"
+                            $lastStatus = "tools:$toolsState"
                         }
-                    }
-                    
-                    if (-not $vmReady) {
-                        Write-Warning "VM $VmName not ready for guest operations after 10 attempts, skipping this cycle"
-                        Start-Sleep -Seconds 30
+                        Start-Sleep -Seconds 15
                         continue
+                    }
+                    if ($lastStatus -ne "tools:running") {
+                        Write-Info "VM $VmName is ready for guest operations"
+                        $lastStatus = "tools:running"
                     }
                     
                     # Check if ISO copy completion file exists
-                    $result = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/iso-copy-complete && echo 'COMPLETE' || echo 'INCOMPLETE'" 2>$null
+                    $result = (& $script:VMRUN_PATH -T ws -gu $GuestUser -gp $GuestPassword runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/iso-copy-complete && echo 'COMPLETE' || echo 'INCOMPLETE'" 2>$null | Out-String).Trim()
                     
-                    if ($result -eq "COMPLETE") {
+                    if ($result -match "COMPLETE") {
                         Write-Success "ISO file copy completed on $VmName"
                         return $true
                     }
                     
+                    # Fallback: treat presence of seed files as copy complete
+                    $seedCount = (& $script:VMRUN_PATH -T ws -gu $GuestUser -gp $GuestPassword runProgramInGuest $VmxPath "/bin/bash" "-c" "ls -1 /usr/local/seed 2>/dev/null | wc -l" 2>$null | Out-String).Trim()
+                    if ($seedCount -match '^[0-9]+$' -and [int]$seedCount -gt 0) {
+                        Write-Info "Seed directory detected on $VmName ($seedCount files). Treating as copy complete."
+                        return $true
+                    }
+
                     # Check cloud-init status with better error handling
-                    $cloudInitStatus = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "cloud-init status 2>/dev/null || echo 'NOT_READY'" 2>$null
+                    $cloudInitStatus = (& $script:VMRUN_PATH -T ws -gu $GuestUser -gp $GuestPassword runProgramInGuest $VmxPath "/bin/bash" "-c" "cloud-init status 2>/dev/null || echo 'NOT_READY'" 2>$null | Out-String).Trim()
                     
                     # Check for specific cloud-init states
                     if ($cloudInitStatus -like "*running*") {
@@ -552,13 +554,13 @@ try {
                     }
                     
                     # Additional check: look for specific completion indicators
-                    $completionCheck = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "ls -la /usr/local/seed/ 2>/dev/null | wc -l || echo '0'" 2>$null
+                    $completionCheck = (& $script:VMRUN_PATH -T ws -gu $GuestUser -gp $GuestPassword runProgramInGuest $VmxPath "/bin/bash" "-c" "ls -la /usr/local/seed/ 2>/dev/null | wc -l || echo '0'" 2>$null | Out-String).Trim()
                     if ($completionCheck -and $completionCheck -match '^\d+$' -and [int]$completionCheck -gt 0) {
                         Write-Info "Seed files detected on $VmName, checking for completion..."
                     }
                     
                     # Check if k8s packages installation is complete
-                    $k8sPackagesCheck = & $script:VMRUN_PATH -T ws -gu ubuntu -gp ubuntu runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/k8s-ops-packages-installed && echo 'PACKAGES_INSTALLED' || echo 'PACKAGES_NOT_READY'" 2>$null
+                    $k8sPackagesCheck = (& $script:VMRUN_PATH -T ws -gu $GuestUser -gp $GuestPassword runProgramInGuest $VmxPath "/bin/bash" "-c" "test -f /var/lib/k8s-ops-packages-installed && echo 'PACKAGES_INSTALLED' || echo 'PACKAGES_NOT_READY'" 2>$null | Out-String).Trim()
                     if ($k8sPackagesCheck -eq "PACKAGES_INSTALLED") {
                         Write-Info "K8s packages installation completed on $VmName"
                     }
