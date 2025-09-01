@@ -585,6 +585,8 @@ autoinstall:
           if [ -d "/usr/local/seed" ]; then
             SEED_BASE="/usr/local/seed"
             echo "Using local seed at ${DOLLAR}{SEED_BASE}"
+            echo "Seed contents:"
+            ls -la "${DOLLAR}{SEED_BASE}/"
           else
             echo "Local seed not found, attempting to mount CD..."
             mkdir -p /tmp/seed
@@ -602,10 +604,22 @@ autoinstall:
             fi
           fi
           
+          # Verify SEED_BASE is set
+          if [ -z "${SEED_BASE}" ]; then
+            echo "Error: SEED_BASE is not set"
+            exit 1
+          fi
+          echo "Final SEED_BASE: ${SEED_BASE}"
+          
           # Copy k3s binary
-          if [ -f "${SEED_BASE}/k3s" ] || ls -1 "${SEED_BASE}"/k3s* >/dev/null 2>&1; then
+          if [ -f "${DOLLAR}{SEED_BASE}/k3s" ] || ls -1 "${DOLLAR}{SEED_BASE}"/k3s* >/dev/null 2>&1; then
             # Handle possible Windows shortname copy (k3s* -> exact 'k3s')
-            if [ -f "${SEED_BASE}/k3s" ]; then SRC="${SEED_BASE}/k3s"; else SRC=$(ls -1 "${SEED_BASE}"/k3s* 2>/dev/null | head -n1); fi
+            if [ -f "${DOLLAR}{SEED_BASE}/k3s" ]; then 
+              SRC="${DOLLAR}{SEED_BASE}/k3s"
+            else 
+              SRC=$(ls -1 "${DOLLAR}{SEED_BASE}"/k3s* 2>/dev/null | head -n1)
+            fi
+            echo "Installing K3s binary from: ${SRC}"
             install -m 0755 "${SRC}" /usr/local/bin/k3s
             echo "K3s binary copied successfully"
           else

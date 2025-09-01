@@ -911,6 +911,19 @@ docker images --digests
 - **IP 대역**: 192.168.6.x (통일된 네트워크 설정)
 
 ## 🔧 최근 변경사항
+### 2025-09-01: 마스터 템플릿 런타임 변수 이스케이프 수정 (중요)
+- **문제**: `user-data-master.tpl`에서 `setup-k3s-master.sh`의 `${SEED_BASE}`가 ISO 빌드 시 `envsubst`로 비워져 k3s 복사 단계가 실패할 수 있음
+- **해결**: 2025-09-01에 `setup-k3s-master.sh` 스크립트의 SRC 변수 설정 및 SEED_BASE 검증 로직 개선
+- **수정**: `${SEED_BASE}`를 `${DOLLAR}{SEED_BASE}`로 이스케이프하여 런타임에 올바르게 평가되도록 변경 (2곳)
+- **영향**: k3s 바이너리 복사 및 클러스터 부트스트랩 안정화
+
+### 2025-09-01: PowerShell 스크립트 변수 참조 구문 수정 (중요)
+- **문제**: `Setup-VMs.ps1`에서 `$guestSyntax.Name`, `$guestSyntax.Args` 접근 시 PowerShell 구문 오류 발생
+- **원인**: 해시테이블 속성 접근 시 잘못된 구문 사용
+- **해결**: `$guestSyntax['Name']`, `$guestSyntax['Args']` 형태로 수정 (4곳)
+- **영향**: VM 생성 스크립트 실행 오류 해결
+- **파일**: `wsl/templates/user-data-master.tpl`
+
 
 ### 2024-12-19: k8s 운영 도구 설치 개선 및 CDROM 마운트 해제 로직 개선 (8차 수정)
 - **문제**: 
@@ -984,6 +997,15 @@ docker images --digests
   - `packages` 섹션에 필수 패키지 목록 추가
 - **영향**: Ubuntu 22.04 자동 설치 시 인터랙티브 프롬프트 완전 제거
 - **파일**: `wsl/templates/user-data-master.tpl`, `wsl/templates/user-data-worker.tpl`
+
+### 250901 - PowerShell 스크립트 vmrun 타임아웃 문제 해결
+- **문제**: `Setup-VMs.ps1` 실행 시 `vmrun guest command syntax` 테스트에서 무한 대기 발생
+- **원인**: `Test-VMRunGuestSyntax` 함수에서 `vmrun` 명령어 실행 시 타임아웃 처리 부족
+- **해결**: 
+  - `Test-VMRunGuestSyntax` 함수에 30초 타임아웃 추가
+  - `Wait-ForVMReady` 함수에서 vmrun 구문 테스트에 60초 타임아웃 추가
+  - Job 기반 비동기 실행으로 무한 대기 방지
+- **영향**: VM 생성 후 준비 상태 확인 기능 정상화, 스크립트 진행 중단 문제 해결
 
 ## 🎯 다음 단계
 
