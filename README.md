@@ -995,6 +995,36 @@ docker images --digests
   - 워커 ISO 분리 병렬 처리, 불필요한 대기 시간 축소
 - 예상 효과: 전체 실행 시간 단축(환경에 따라 6~9분 수준), 완료 판정 정확도 향상
 
+#### Wait for VMs ready 단계가 멈출 때 (트러블슈팅)
+**증상**: 다음 로그 이후 수 분간 아무 변화가 없는 것처럼 보임
+
+```text
+[INFO] Waiting for VMs to be ready for operations...
+[INFO] Waiting for VM k3s-master1 to be ready for operations (max 20 minutes)...
+```
+
+**원인**: 과거 버전에서 SSH 실패 시 즉시 반복으로 넘어가(vmrun/기타 신호 확인을 스킵) SSH만 재시도하는 문제가 있었습니다.
+
+**해결(적용됨)**:
+- SSH 실패 후에도 vmrun 구문 테스트와 게스트 IP/Tools 신호 확인을 수행하도록 수정되었습니다.
+- 주기적 진행 로그가 추가되어, SSH가 아직 준비되지 않은 경우에도 경과 시간이 보입니다.
+
+**확인 팁**:
+- VMware 콘솔에서 VM이 네트워크를 획득했는지 확인합니다.
+- Windows에서 다음 명령으로 SSH 포트가 열리는지 확인합니다:
+  ```powershell
+  Test-NetConnection 192.168.6.10 -Port 22
+  ```
+- 문제가 지속되면 `windows/Check-VMs.ps1`로 상태를 점검하세요.
+
+**SSH 옵션/키 관련 팁**:
+- 본 스크립트는 Windows `ssh.exe` 사용 시 다음 옵션을 강제해 키 우선 순위를 고정합니다:
+  - `-o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 -o ConnectionAttempts=1`
+- 수동 점검 시에도 동일 옵션을 사용해 주세요.
+  ```powershell
+  ssh -i .\wsl\out\ssh\id_rsa -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 -o StrictHostKeyChecking=no ubuntu@192.168.6.10 "echo vm_ready"
+  ```
+
 ### 2025-09-02: K3s 기본 컴포넌트 활성화 (중요)
 - 변경: `wsl/templates/user-data-master.tpl`에서 K3s `config.yaml` 생성 시 `disable` 항목(`traefik`, `servicelb`) 제거하여 기본 컴포넌트가 자동 배포되도록 수정
 - 영향: Traefik(Ingress), ServiceLB, local-path-provisioner, CoreDNS, metrics-server, pause 등이 기본값대로 배포됨

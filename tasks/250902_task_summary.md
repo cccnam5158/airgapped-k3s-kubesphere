@@ -76,7 +76,75 @@
 - 가장 큰 병목은 `Wait for VMs ready`(약 16분, 전체의 ~90%).
   - 원인1: `Wait-ForVMReady`에서 VMware Tools 가동 후 고정 대기(`$minToolsWaitTime = 300s`)를 VM 별 순차 적용(마스터 → 워커1 → 워커2).
   - 원인2: 게스트 명령 테스트(`vmrun runProgramInGuest`)가 실패하여 단순화된 체크로 전환되며, 그 전에 최대 60초 타임아웃을 VM 별로 소모.
-- `Disconnect ISOs`(41.5s): 각 VM을 soft stop 후 VMX 수정, 5초 대기 등을 VM별 순차 처리.
+
+## 250902 핫픽스: Wait-ForVMReady 조기 continue 제거 및 진행상황 로그 추가
+
+### 증상
+- `Start VMs` 이후 `Wait for VMs ready` 단계에서 다음 메시지 이후 진행이 멈춤:
+  - `Waiting for VM k3s-master1 to be ready for operations (max 20 minutes)...`
+
+### 원인
+- `Wait-ForVMReady` 내부에서 SSH 체크 실패 시 바로 `continue`하는 로직 때문에, 동일 반복에서 이어지는 vmrun 구문 테스트 및 기타 준비 신호(IP, Tools 상태) 확인이 스킵됨.
+- 결과적으로 SSH만 10초 간격으로 재시도하며, 다른 경로의 조기 준비 신호를 활용하지 못해 대기 시간이 과도하게 길어짐.
+
+### 조치
+- SSH 실패 후에도 vmrun 구문 테스트와 기타 신호 확인 로직이 실행되도록 `continue` 제거.
+- SSH 미준비 상태에서 경과 시간 기반의 주기적 진행상황 로그를 추가(대략 30초 주기)하여 사용자 피드백 강화.
+
+### 변경 파일
+- `windows/Setup-VMs.ps1`
+  - SSH 블록 직후 `continue` 제거
+  - SSH 미준비 시 진행 로그 추가 (`SSH not ready for <VM> yet (elapsed: Ns). Retrying...`)
+
+### 기대 효과
+- SSH가 아직 열리지 않아도 vmrun 기반 신호(IP, Tools) 또는 후속 SSH 시도로 조기 준비 판별 가능.
+- 대기 단계에서의 "정체처럼 보이는" 현상 완화 및 원인 파악 용이.
+
+## 250902 핫픽스: SSH 준비 확인 강화(IdenitiesOnly, 2-step 명령, 실패 원인 로그)
+
+### 배경
+- 사용자는 PowerShell/다른 클라이언트로는 `Test-NetConnection 192.168.6.10 -Port 22` 및 SSH 접속이 가능한데, 스크립트에서는 SSH 준비가 안 된 것으로 반복 출력되는 문제를 보고.
+
+### 원인 후보
+- Windows `ssh.exe`가 에이전트/기본 키를 우선 시도하면서, 지정 키(`wsl/out/ssh/id_rsa`)가 스킵되거나 잘못된 인증 경로로 시도됨.
+- `bash -lc`를 통한 명령 전달이 실패(쉘/환경 초기화 지연)하여 단순 에코도 실패로 간주될 수 있음.
+
+### 조치
+- SSH 옵션 강화:
+  - `-o IdentitiesOnly=yes`, `-o NumberOfPasswordPrompts=0`, `-o ConnectionAttempts=1` 추가
+  - 키 우선 순위 고정, 비대화/무패스워드 보장, 빠른 실패
+- 이중 명령 시도:
+  1) `bash -lc "echo vm_ready"`
+  2) 실패 시 `echo vm_ready`로 재시도(쉘 초기화 의존도 축소)
+- 실패 원인 요약 로그 추가:
+  - `Permission denied`(키/계정 문제), 키 퍼미션 문제, 네트워크 타임아웃 등 대표 케이스 메시지 출력
+
+### 변경 파일
+- `windows/Setup-VMs.ps1` SSH 준비 확인 블록
+
+### 기대 효과
+- 포트는 열려있지만 인증/쉘 초기화 이슈로 인한 오탐 감소
+- 실패 사유를 로그로 즉시 파악 가능 → 진단 시간 단축
+
+## 250902 추가: SSH 디버깅 로그 (경로/인자/실행파일)
+
+### 목적
+- 실행 경로 조합(특히 `wsl/out/ssh/id_rsa`)의 정확성과 실제 사용되는 `ssh.exe`/인자 확인을 위해 추가 디버깅 로그를 출력
+
+### 추가 로그 항목
+- 현재 작업 디렉토리(`cwd`)
+- `repoRoot` 계산 값
+- `keyPath` 실제 경로 및 존재 여부
+- 사용되는 `ssh.exe` 경로(`Get-Command ssh` 결과)
+- 조립된 SSH 기본 인자(base args)
+
+### 변경 파일
+- `windows/Setup-VMs.ps1` (`Wait-ForVMReady` 내 SSH 준비 확인 블록)
+
+### 활용 방법
+- `Wait for VMs ready` 단계에서 `[SSH-Debug]`로 시작하는 로그를 확인하여 경로/인자 문제가 없는지 즉시 진단
+
+-- `Disconnect ISOs`(41.5s): 각 VM을 soft stop 후 VMX 수정, 5초 대기 등을 VM별 순차 처리.
 
 ### 미완료/오탐 지점
 - `vmrun` 게스트 명령이 모두 실패하여 실제 완료 지표(`/var/lib/iso-copy-complete`) 확인을 건너뜀.

@@ -506,29 +506,75 @@ function Wait-ForVMReady {
                     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
                     $keyPath = Join-Path $repoRoot "wsl\out\ssh\id_rsa"
                     if (Test-Path $keyPath) {
-                        $sshArgs = @(
+                        # 디버그: 경로 및 ssh 실행 파일 확인
+                        try {
+                            $cwd = Get-Location | Select-Object -ExpandProperty Path
+                        } catch { $cwd = "(unknown)" }
+                        try {
+                            $sshCmd = (Get-Command ssh -ErrorAction SilentlyContinue).Source
+                        } catch { $sshCmd = "(not found)" }
+                        Write-Info "[SSH-Debug] cwd=$cwd"
+                        Write-Info "[SSH-Debug] repoRoot=$repoRoot"
+                        Write-Info "[SSH-Debug] keyPath=$keyPath (exists=$([bool](Test-Path $keyPath)))"
+                        Write-Info "[SSH-Debug] ssh.exe=$sshCmd"
+
+                        # 공통 SSH 옵션 강화
+                        $sshBaseArgs = @(
                             "-i", $keyPath,
                             "-o", "BatchMode=yes",
+                            "-o", "IdentitiesOnly=yes",
+                            "-o", "NumberOfPasswordPrompts=0",
                             "-o", "PreferredAuthentications=publickey",
                             "-o", "StrictHostKeyChecking=no",
                             "-o", "UserKnownHostsFile=NUL",
+                            "-o", "ConnectionAttempts=1",
                             "-o", "ConnectTimeout=5",
-                            "ubuntu@$GuestIP",
-                            "bash", "-lc",
-                            "echo vm_ready"
+                            "ubuntu@$GuestIP"
                         )
-                        $sshResult = & ssh @sshArgs 2>&1
+                        Write-Info ("[SSH-Debug] ssh base args: " + ($sshBaseArgs -join ' '))
+
+                        $sshSucceeded = $false
+                        $sshResult = ""
+
+                        # 1차 시도: bash -lc 'echo vm_ready'
+                        $sshArgs1 = $sshBaseArgs + @("bash", "-lc", "echo vm_ready")
+                        $sshResult = & ssh @sshArgs1 2>&1
                         if ($LASTEXITCODE -eq 0 -and $sshResult -match "vm_ready") {
+                            $sshSucceeded = $true
+                        } else {
+                            # 2차 시도: 쉘 의존도 낮춘 단순 명령
+                            $sshArgs2 = $sshBaseArgs + @("echo", "vm_ready")
+                            $sshResult = & ssh @sshArgs2 2>&1
+                            if ($LASTEXITCODE -eq 0 -and $sshResult -match "vm_ready") {
+                                $sshSucceeded = $true
+                            }
+                        }
+
+                        if ($sshSucceeded) {
                             Write-Success "VM $VmName is reachable via SSH"
                             return $true
+                        }
+
+                        # 실패 원인 요약 로그 (주요 케이스)
+                        if ($sshResult -match "Permission denied") {
+                            Write-Info "SSH auth failed for ${VmName} (Permission denied). Checking other readiness signals..."
+                        } elseif ($sshResult -match "Too\s+open|unprotected private key file") {
+                            Write-Info "SSH key permissions issue detected for ${VmName}. Ensure key ACLs are restricted."
+                        } elseif ($sshResult -match "No route to host|Connection timed out|Operation timed out") {
+                            Write-Info "SSH network issue to ${VmName}. Will retry."
+                        }
+
+                        # SSH 미준비 상태 진행상황 로그 (주기적)
+                        $elapsed = [int]((Get-Date) - $startTime).TotalSeconds
+                        if ($elapsed % 30 -lt 10) { # 30초 주기로 10초 윈도우에서 한번 출력
+                            Write-Info "SSH not ready for $VmName yet (elapsed: ${elapsed}s). Retrying..."
                         }
                     }
                 } catch { }
             }
             
-            # Fallback: minimal sleep before next SSH attempt
-            Start-Sleep -Seconds 10
-            continue
+            # SSH 실패 시에도 아래 vmrun 구문 테스트 및 기타 신호 확인을 계속 진행
+            # 단, 다음 루프 과도한 폴링 방지를 위해 마지막에 짧게 대기
             
             # Test guest connectivity if we haven't found working syntax yet and haven't attempted
             if (-not $guestSyntax -and -not $syntaxTestAttempted) {
