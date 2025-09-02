@@ -505,12 +505,11 @@ function Wait-ForVMReady {
                 try {
                     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
                     $keyPath = Join-Path $repoRoot "wsl\out\ssh\id_rsa"
-                    $sshOpen = $false
-                    try { $sshOpen = Test-NetConnection -ComputerName $GuestIP -Port 22 -InformationLevel Quiet } catch { $sshOpen = $false }
-                    if ($sshOpen -and (Test-Path $keyPath)) {
+                    if (Test-Path $keyPath) {
                         $sshArgs = @(
                             "-i", $keyPath,
                             "-o", "BatchMode=yes",
+                            "-o", "PreferredAuthentications=publickey",
                             "-o", "StrictHostKeyChecking=no",
                             "-o", "UserKnownHostsFile=NUL",
                             "-o", "ConnectTimeout=5",
@@ -651,13 +650,7 @@ function Wait-ForVMReady {
                     if ($ipOut -match "^(?:\d{1,3}\.){3}\d{1,3}$") { $readySignals += "ip:$ipOut" }
                 } catch { }
 
-                # If target IP known, check SSH port quickly
-                if ($GuestIP) {
-                    try {
-                        $sshOpen = Test-NetConnection -ComputerName $GuestIP -Port 22 -InformationLevel Quiet
-                        if ($sshOpen) { $readySignals += "ssh:$GuestIP" }
-                    } catch { }
-                }
+                # Skip port precheck; rely on direct SSH attempts with short timeout
 
                 if ($readySignals.Count -gt 0 -and $toolsRunTime -ge 60) {
                     Write-Info "VM $VmName appears ready (signals: $($readySignals -join ', '))"

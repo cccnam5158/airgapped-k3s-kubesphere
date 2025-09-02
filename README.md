@@ -12,6 +12,41 @@ Windows 10/11 환경에서 VMware Workstation Pro를 사용하여 완전히 오�
 - **호환성 보장**: 안전한 버전 조합으로 안정성 확보
 - **로컬 Docker 레지스트리**: 이미지 미러링을 통한 오프라인 지원
 
+## 📚 목차
+
+- **핵심 안내**
+  - [프로젝트 개요](#-프로젝트-개요)
+  - [아키텍처](#-아키텍처)
+  - [실행 순서 요약](#-실행-순서-요약)
+  - [빠른 시작](#-빠른-시작)
+  - [사전 요구사항](#-사전-요구사항)
+- **사용 안내**
+  - [프로젝트 구조](#-프로젝트-구조)
+  - [접속 정보](#-접속-정보)
+  - [시간 동기화(중요)](#-시간-동기화중요)
+  - [구성 요소 버전](#-구성-요소-버전)
+- **트러블슈팅/개선**
+  - [문제 해결(트러블슈팅) 안내](#-문제-해결트러블슈팅-안내)
+  - [최근 변경사항](#-최근-변경사항)
+  - [참고자료](#-관련-자료)
+  - [라이선스](#-라이선스)
+
+## 🏗 아키텍처
+
+- Windows Host에서 VMware Workstation에 1 Master + N Worker VM을 자동 설치(cloud-init autoinstall)하여 k3s + KubeSphere 클러스터를 구성합니다.
+- WSL2는 Seed ISO 생성, 레지스트리, 인증서 생성 등 오프라인 자산을 제공합니다.
+- SSH는 키 기반 인증만 허용합니다(`wsl/out/ssh/id_rsa`).
+- 상세 플로우는 다음 문서를 참고하세요: `windows/setup-vm-process-diagram.md`
+
+## 🧭 실행 순서 요약
+
+1. 관리자 PowerShell에서 환경 검증 (`./scripts/check-env.ps1`)
+2. WSL2 Ubuntu에서 오프라인 준비 (`wsl/scripts/00_prep_offline_fixed.sh`)
+3. 관리자 PowerShell에서 포트 포워딩 설정 (`./scripts/setup-port-forwarding.ps1`)
+4. WSL2 Ubuntu에서 Seed ISO 생성 (`wsl/scripts/01_build_seed_isos.sh`)
+5. 관리자 PowerShell에서 VM 생성 (`./scripts/setup-vms.ps1`)
+6. WSL2 Ubuntu에서 클러스터 확인 (`wsl/scripts/02_wait_and_config.sh`)
+
 ## 📁 프로젝트 구조
 
 ```
@@ -780,16 +815,11 @@ chmod +x time-sync-diagnose.sh
 - 현재 미러링된 이미지들로 코어 컴포넌트 설치
 - 확장 컴포넌트는 나중에 개별 설치
 
-## 🔄 실행 순서 요약
+<!-- 실행 순서 요약은 상단 '🧭 실행 순서 요약' 섹션으로 이동했습니다. -->
 
-1. **관리자 PowerShell**에서 환경 검증
-2. **WSL2 Ubuntu**에서 오프라인 준비 (00_prep_offline_fixed.sh)
-3. **관리자 PowerShell**에서 포트 포워딩 설정
-4. **WSL2 Ubuntu**에서 Seed ISO 생성 (01_build_seed_isos.sh)
-5. **관리자 PowerShell**에서 VM 생성 (Setup-VMs.ps1)
-6. **WSL2 Ubuntu**에서 클러스터 확인 (02_wait_and_config.sh)
+## 🧩 문제 해결(트러블슈팅) 안내
 
-## 🧩 재부팅 시 설치가 다시 진행되는 문제(해결)
+### 재부팅 시 설치가 다시 진행되는 문제(해결)
 
 ### 증상
 - VM을 재부팅하면 Ubuntu 설치가 다시 시작되거나 cloud-init autoinstall 화면으로 진입함
