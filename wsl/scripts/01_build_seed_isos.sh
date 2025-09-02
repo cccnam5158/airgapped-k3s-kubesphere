@@ -543,9 +543,12 @@ generate_cloud_init_files() {
     local autoinstall_dir="$WORK_DIR/extracted/autoinstall"
     mkdir -p "$autoinstall_dir"
     
+    # envsubst가 치환할 변수만 화이트리스트로 제한하여 런타임 쉘 변수($packages_dir, $deb_file 등)가 빈 문자열로 치환되지 않도록 보호
+    local SUBST_VARS='$REGISTRY_HOST_IP $REGISTRY_PORT $POD_CIDR $SVC_CIDR $MASTER_IP $WORKER_IP $WORKER1_IP $WORKER2_IP $GATEWAY_IP $DNS_IP $TOKEN $PASSWORD_HASH $SSH_PUBLIC_KEY $DOLLAR'
+    
     # Master cloud-init 파일 생성
     log_info "Master cloud-init 파일 생성 중..."
-    envsubst < "$TPL_DIR/user-data-master.tpl" > "$autoinstall_dir/user-data-master1"
+    envsubst "$SUBST_VARS" < "$TPL_DIR/user-data-master.tpl" > "$autoinstall_dir/user-data-master1"
     
     # Master meta-data 파일 생성
     cat > "$autoinstall_dir/meta-data-master1" << EOF
@@ -558,7 +561,7 @@ EOF
     # hostname을 worker1으로 변경
     sed 's/hostname: k3s-master1/hostname: k3s-worker1/' "$TPL_DIR/user-data-worker.tpl" | \
     sed 's/${WORKER_IP}/${WORKER1_IP}/' | \
-    envsubst > "$autoinstall_dir/user-data-worker1"
+    envsubst "$SUBST_VARS" > "$autoinstall_dir/user-data-worker1"
     
     # Worker1 meta-data 파일 생성
     cat > "$autoinstall_dir/meta-data-worker1" << EOF
@@ -571,7 +574,7 @@ EOF
     # hostname을 worker2로 변경
     sed 's/hostname: k3s-worker1/hostname: k3s-worker2/' "$TPL_DIR/user-data-worker.tpl" | \
     sed 's/${WORKER_IP}/${WORKER2_IP}/' | \
-    envsubst > "$autoinstall_dir/user-data-worker2"
+    envsubst "$SUBST_VARS" > "$autoinstall_dir/user-data-worker2"
     
     # Worker2 meta-data 파일 생성
     cat > "$autoinstall_dir/meta-data-worker2" << EOF

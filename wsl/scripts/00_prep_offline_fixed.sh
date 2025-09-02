@@ -34,6 +34,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$PROJECT_ROOT/out"
 
+# Registry network configuration (used for TLS SANs and client access from VMs)
+# Default host IP is the Windows host-only IP that VMs reach; override via env if needed
+REGISTRY_HOST_IP="${REGISTRY_HOST_IP:-192.168.6.1}"
+REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+
 # 이미지 목록 파일 선택
 IMAGES_FILE="$PROJECT_ROOT/examples/images-fixed.txt"
 
@@ -100,17 +105,22 @@ install_packages() {
 
 # TLS 인증서 생성
 generate_certificates() {
-    log_info "레지스트리용 TLS 인증서 생성 중..."
+    log_info "레지스트리용 TLS 인증서 생성 중... (SAN: IP:${REGISTRY_HOST_IP}, IP:127.0.0.1, DNS:localhost)"
     
     local cert_dir="$OUTPUT_DIR/certs"
     mkdir -p "$cert_dir"
     
-    # 자체 서명 인증서 생성
-    openssl req -x509 -newkey rsa:4096 -keyout "$cert_dir/registry.key" \
-        -out "$cert_dir/registry.crt" -days 365 -nodes \
-        -subj "/C=KR/ST=Seoul/L=Seoul/O=Private Registry/OU=Airgap Lab/CN=localhost"
+    # 자체 서명 인증서 생성 (OpenSSL 1.1.1+)
+    # - CN 은 VM에서 접근하는 호스트 IP로 설정
+    # - SAN 에 VM/IP 및 localhost 를 포함해 WSL 내부/외부 모두 유효하도록 설정
+    openssl req -x509 -newkey rsa:4096 \
+        -keyout "$cert_dir/registry.key" \
+        -out "$cert_dir/registry.crt" \
+        -days 365 -nodes \
+        -subj "/C=KR/ST=Seoul/L=Seoul/O=Private Registry/OU=Airgap Lab/CN=${REGISTRY_HOST_IP}" \
+        -addext "subjectAltName=IP:${REGISTRY_HOST_IP},IP:127.0.0.1,DNS:localhost"
     
-    # ca.crt 파일도 생성 (01_build_seed_isos.sh에서 필요)
+    # ca.crt 파일도 생성 (seed ISO 에 포함되어 VM 신뢰 저장소에 설치됨)
     cp "$cert_dir/registry.crt" "$cert_dir/ca.crt"
     
     log_success "TLS 인증서 생성 완료"
@@ -118,14 +128,14 @@ generate_certificates() {
 
 # 로컬 레지스트리 시작
 start_registry() {
-    log_info "localhost:5000에서 로컬 레지스트리 확인 중..."
+    log_info "localhost:${REGISTRY_PORT}에서 로컬 레지스트리 확인 중..."
     
     # 기존 레지스트리 컨테이너가 실행 중인지 확인
     if docker ps --format "table {{.Names}}" | grep -q "^airgap-registry$"; then
         log_info "기존 레지스트리가 실행 중입니다. 재사용합니다."
         
         # 레지스트리 상태 확인
-        if curl -k -s https://localhost:5000/v2/ > /dev/null 2>&1; then
+        if curl -k -s https://localhost:${REGISTRY_PORT}/v2/ > /dev/null 2>&1; then
             log_success "기존 레지스트리가 정상 동작 중입니다"
             return 0
         else
@@ -139,7 +149,7 @@ start_registry() {
     
     # 새 레지스트리 컨테이너 시작 (모든 인터페이스에 바인딩)
     docker run -d --name airgap-registry \
-        -p 0.0.0.0:5000:5000 \
+        -p 0.0.0.0:${REGISTRY_PORT}:5000 \
         -v "$OUTPUT_DIR/registry:/var/lib/registry" \
         -v "$OUTPUT_DIR/certs:/certs" \
         -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
@@ -150,7 +160,7 @@ start_registry() {
     log_info "레지스트리 시작 대기 중..."
     local retry_count=0
     while [ $retry_count -lt 10 ]; do
-        if curl -k -s https://localhost:5000/v2/ > /dev/null 2>&1; then
+        if curl -k -s https://localhost:${REGISTRY_PORT}/v2/ > /dev/null 2>&1; then
             log_success "레지스트리 시작 완료"
             return 0
         fi
@@ -164,7 +174,7 @@ start_registry() {
 
 # 이미지 미러링
 mirror_images() {
-    log_info "이미지 미러링 시작: $IMAGES_FILE -> localhost:5000"
+    log_info "이미지 미러링 시작: $IMAGES_FILE -> localhost:${REGISTRY_PORT}"
     
     local total_images=$(wc -l < "$IMAGES_FILE")
     local current=0
@@ -180,7 +190,7 @@ mirror_images() {
         target_image=$(echo "$target_image" | tr -d '\r')
         
         current=$((current + 1))
-        log_info "[$current/$total_images] 미러링: $source_image -> localhost:5000/$target_image"
+        log_info "[$current/$total_images] 미러링: $source_image -> localhost:${REGISTRY_PORT}/$target_image"
         
         # 이미지 pull 및 push (3회 재시도)
         local retry_count=0
@@ -188,8 +198,8 @@ mirror_images() {
         
         while [ $retry_count -lt 3 ] && [ "$success" = false ]; do
             if docker pull "$source_image" && \
-               docker tag "$source_image" "localhost:5000/$target_image" && \
-               docker push "localhost:5000/$target_image"; then
+               docker tag "$source_image" "localhost:${REGISTRY_PORT}/$target_image" && \
+               docker push "localhost:${REGISTRY_PORT}/$target_image"; then
                 success=true
             else
                 retry_count=$((retry_count + 1))
@@ -259,43 +269,43 @@ download_airgap_images() {
 
 # registries.yaml 생성
 generate_registries_config() {
-    log_info "registries.yaml 설정 생성 중..."
+    log_info "registries.yaml 설정 생성 중... (VM → https://${REGISTRY_HOST_IP}:${REGISTRY_PORT})"
     
     cat > "$OUTPUT_DIR/registries.yaml" << EOF
 mirrors:
-  "192.168.6.1:5000":
+  "${REGISTRY_HOST_IP}:${REGISTRY_PORT}":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "registry.k8s.io":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "docker.io":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "quay.io":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "gcr.io":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "kubesphere":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "prom":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "grafana":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "bitnami":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
   "rancher":
     endpoint:
-      - "https://192.168.6.1:5000"
+      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
 
 configs:
-  "192.168.6.1:5000":
+  "${REGISTRY_HOST_IP}:${REGISTRY_PORT}":
     tls:
       ca_file: /usr/local/share/ca-certificates/airgap-registry-ca.crt
       insecure_skip_verify: false
@@ -334,7 +344,8 @@ main() {
     
     log_success "오프라인 준비 완료"
     log_info "출력 디렉토리: $OUTPUT_DIR"
-    log_info "레지스트리 URL: https://localhost:5000"
+    log_info "레지스트리 URL (WSL 내부): https://localhost:${REGISTRY_PORT}"
+    log_info "레지스트리 URL (VM에서 접근): https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
     log_info "SSH 개인키: $OUTPUT_DIR/ssh/id_rsa"
 }
 

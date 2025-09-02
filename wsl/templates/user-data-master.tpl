@@ -39,6 +39,24 @@ autoinstall:
       EOF'
     - echo 'Acquire::http::Proxy "false";' > /etc/apt/apt.conf.d/00-no-net
     - echo "APT 타임아웃 설정 완료" >> /var/log/cloud-init-debug.log
+    - echo "APT 주기 작업 및 unattended-upgrades 비활성화 중..." >> /var/log/cloud-init-debug.log
+    - systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+    - systemctl disable apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+    - systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    - systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    - systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+    - |
+      bash -c 'cat > /etc/apt/apt.conf.d/10periodic <<EOF
+      APT::Periodic::Enable "0";
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Unattended-Upgrade "0";
+      EOF'
+    - |
+      bash -c 'cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Unattended-Upgrade "0";
+      EOF'
+    - echo "APT 주기 작업 및 unattended-upgrades 비활성화 완료" >> /var/log/cloud-init-debug.log
     - echo "네트워크 APT 소스 비활성화(airgap) 진행... (cdrom 보존)" >> /var/log/cloud-init-debug.log
     - bash -c 'cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true'
     - bash -c 'sed -i "s/^deb http/# deb http/; s/^deb https/# deb https/" /etc/apt/sources.list 2>/dev/null || true'
@@ -322,7 +340,7 @@ autoinstall:
           # 설치 성공률 계산
           total_packages=8
           installed_count=0
-          for cmd in jq htop ethtool ip dnsutils telnet fuser iostat; do
+          for cmd in jq htop ethtool ip dig telnet fuser iostat; do
             if command -v "$cmd" >/dev/null 2>&1; then
               installed_count=$((installed_count + 1))
             fi
@@ -345,7 +363,7 @@ autoinstall:
         content: |
           [Unit]
           Description=K3s Master Bootstrap
-          After=local-fs.target network-online.target cloud-final.service sync-time.service k8s-ops-packages.service
+          After=local-fs.target network-online.target sync-time.service k8s-ops-packages.service
           Wants=network-online.target sync-time.service
           ConditionPathExists=/usr/local/bin/setup-k3s-master.sh
 
@@ -366,7 +384,7 @@ autoinstall:
         content: |
           [Unit]
           Description=Install K8s Operations Packages
-          After=local-fs.target network-online.target cloud-final.service
+          After=local-fs.target network-online.target
           Wants=network-online.target
           ConditionPathExists=/usr/local/bin/install-k8s-ops-packages.sh
 
@@ -627,9 +645,6 @@ autoinstall:
           mkdir -p /etc/rancher/k3s
           cat > /etc/rancher/k3s/config.yaml << EOF
           cluster-init: true
-          disable:
-            - traefik
-            - servicelb
           cluster-cidr: ${POD_CIDR}
           service-cidr: ${SVC_CIDR}
           write-kubeconfig-mode: "644"
