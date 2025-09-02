@@ -136,3 +136,97 @@
 
 ### 비고
 - 환경에 따라 `REGISTRY_HOST_IP`를 오버라이드 가능. 기본값은 `192.168.6.1`.
+
+# 250902 추가 작업: Windows 콘솔 한글 중복 출력 및 vmrun 동작 메모
+
+## 현상
+- `windows/Setup-VMs.ps1` 실행 로그에서 한글이 "완완료료", "단단계계별별"처럼 중복 출력.
+- `vmrun` 게스트 명령 구문 테스트 시 `Usage: vmrun [AUTHENTICATION-FLAGS] COMMAND ... These must appear before the command` 메시지 반복 출력으로, OldStyleAlt(NewStyleAlt)도 불가로 판정됨.
+
+## 원인 추정
+- Windows 콘솔 코드페이지/인코딩과 PowerShell 출력 인코딩 불일치로 인해 UTF-8 한글이 중복 렌더링.
+- VMware Workstation 17.5.2(빌드 24319023) 환경에서 `vmrun`이 인증 플래그의 사전 배치만 허용하며, 명령 뒤 배치는 도움말(Usage)로 처리.
+
+## 변경 사항
+- `windows/Setup-VMs.ps1` 상단에 UTF-8 강제 설정 추가:
+  - `[Console]::OutputEncoding`/`InputEncoding`을 BOM 없는 UTF-8로 설정
+  - `$OutputEncoding`을 콘솔 인코딩과 일치
+  - `chcp.com 65001`로 코드페이지를 65001(UTF-8)로 전환
+- 스크립트의 기존 로깅/타이머 로직은 그대로 유지
+
+## 기대 효과
+- 한글 로그가 중복되지 않고 정상 출력
+- 실행 결과 요약의 한글 가독성 개선
+
+## 검증
+- 재실행 후 "완료:", "단계별 소요 시간 요약" 문자열이 중복 없이 표시되는지 확인
+- `vmrun` 구문 테스트는 계속 표준 양식(인증 플래그를 명령 앞에 배치)을 1순위로 사용하며, 실패 시 SSH 폴백 경로가 동작하는지 확인
+
+## 참고 (vmrun 동작)
+- 표준 양식(권장):
+  ```powershell
+  vmrun -T ws -gu <guestUser> -gp <guestPassword> runProgramInGuest "C:\path\vm.vmx" "/bin/echo" test
+  ```
+- 대체 양식(명령 뒤 인증 플래그)은 해당 빌드에서 허용되지 않는 것으로 관찰됨. 스크립트는 실패 시 자동으로 단순화된 신호(툴즈 상태, IP, SSH) 기반 판정 및 SSH 폴백을 이용.
+
+## 추가 개선: 완료 판정 신뢰도 향상 및 모니터링 단축 (2025-09-02)
+- 모니터링 최대 대기시간 20분 → 10분으로 축소, 폴링 간격 60초 → 20초로 단축
+- 완료 판정 신호를 `/var/lib/iso-copy-complete`뿐 아니라 다음을 포함하도록 확장:
+  - `/var/lib/cloud-init-complete`
+  - `/var/lib/k3s-bootstrap.done`
+  - `/var/lib/k3s-agent-bootstrap.done`
+- `vmrun` 실패 시 SSH 폴백에서 동일 신호들을 확인하도록 통일
+- 효과: Old/NewSyntax 모두 실패하는 환경에서도 SSH 신호로 조기 완료 판정 가능, 장시간 대기(>20분) 축소
+
+## 추가 개선: vmrun 점검 강화 및 백오프 (2025-09-02)
+- runProgramInGuest 검증/점검 명령을 `bash -lc 'echo vmrun_ok'`로 통일하여 PATH/쉘 차이로 인한 오탐 제거
+- runProgramInGuest 실패 시 `runScriptInGuest`로 동일 검증을 재시도하는 폴백 경로 추가
+- VMware Tools 상태를 `checkToolsState`로 사전 확인하여, Tools 미기동/인증 실패/Usage 출력 등 실패 사유를 로그로 구분
+- Tools 미기동 시 대기 백오프 적용: 10초 → 20초 → 30초(상한)
+- 기대 효과: Usage/Tools not running/인증 실패 상황이 명확히 구분되고, 성공 경로 탐색이 빨라져 전체 대기 시간 단축
+
+## 추가 적용: SSH 폴백 파싱 오류 해결 (2025-09-02)
+
+- 현상: `Setup-VMs.ps1`의 `Check-CompletionStatus`에서 SSH 폴백이 `bash: -c: line 1: syntax error near unexpected token 'then'` 오류로 실패하여 완료 판정이 멈춤
+- 원인: PowerShell → ssh → bash 인자 전달 경로에서 if/then/fi 구문이 인용 경계에 민감하여 파싱 오류 발생 가능
+- 조치: if 블록 대신 안전한 `test` 연산자와 단락 평가(`&&`/`||`) 체인으로 대체
+  - 변경 전: `if [ -f A ] || [ -f B ] || [ -f C ] || [ -f D ]; then echo STATE_COMPLETE; else echo STATE_INCOMPLETE; fi`
+  - 변경 후: `test -f A || test -f B || test -f C || test -f D && echo STATE_COMPLETE || echo STATE_INCOMPLETE`
+- 영향: vmrun 게스트 명령 미동작 환경에서도 SSH 폴백 경로가 안정적으로 동작, 실제 완료 마커 파일 기반 판정 정상화
+- 적용 파일: `windows/Setup-VMs.ps1` (2곳 교체)
+
+## 마커 매핑 및 완료 판정 정책 정비 (2025-09-02)
+
+### VM 내 생성되는 마커 정리
+- 설치/복사 단계(이른 신호)
+  - `/var/lib/iso-copy-complete` (late-commands에서 기록)
+  - `/var/lib/cloud-init-complete` (user-data runcmd에서 기록)
+- 시스템 준비 단계
+  - `/var/lib/timezone-set`, `/var/lib/sync-time-enabled`, `/var/lib/ca-certificates-updated`, `/var/lib/swap-disabled`, `/var/lib/sysctl-applied`, `/var/lib/hostname-set`, `/var/lib/kernel-modules-loaded`
+- k3s 부트스트랩 완료(핵심 완료 신호)
+  - 마스터: `/var/lib/k3s-bootstrap.done`
+  - 워커: `/var/lib/k3s-agent-bootstrap.done`
+- 운영 패키지 설치(선택 신호)
+  - `/var/lib/k8s-ops-packages-installed` (서비스 실행 후)
+  - `/var/lib/k8s-ops-installation-complete` (runcmd 최종 기록)
+
+-### Setup-VMs.ps1의 활용 및 타이밍
+- 준비 대기(Wait-ForVMReady): SSH 우선 접근성 확인으로 전환(22/tcp 응답 + 간단한 쉘 응답)
+- 초기화 완료 모니터링(Check-CompletionStatus): SSH 전용으로 완료 마커 확인
+  - 완료 기준은 역할별 핵심 마커만 인정
+    - 마스터: `/var/lib/k3s-bootstrap.done`
+    - 워커: `/var/lib/k3s-agent-bootstrap.done`
+    - 역할 식별 불가 시 master/worker 부트스트랩 마커 중 하나라도 있으면 완료
+  - vmrun 게스트 명령(runProgramInGuest) 의존성 제거(환경 호환성 문제 회피)
+- ISO 분리 및 재시작: 위의 "핵심 완료 신호" 확인 후 진행 → 재설치 루프 방지에 안전
+
+### 정책 rationale
+- ISO/Cloud-init 마커는 너무 이른 신호라 완료로 간주하지 않음(오탐 방지)
+- k3s 부트스트랩 마커는 클러스터 구성의 실질 완료 지점이므로 완료 판정 기준으로 사용
+- 운영 패키지 마커는 선택적이며 환경/성능에 따라 추가 대기를 유발할 수 있어 완료 판정에 미포함(향후 옵션화 가능)
+
+### 영향
+- 완료 판정 정확도 향상(오탐 제거), ISO 안전 분리 보장, SSH 폴백 안정화로 모니터링 신뢰도 개선
+
+### 도식 문서 추가
+- `windows/setup-vm-process-diagram.md`: `scripts/setup-vms.ps1` ↔ `windows/Setup-VMs.ps1` 흐름과 SSH-only 체크, 마커 정책을 Mermaid로 도식화

@@ -28,6 +28,21 @@ param(
   [string]$GuestPassword = $null  # Will be set from environment or default
 )
 
+# Force UTF-8 console encoding to prevent duplicated Hangul characters in output
+try {
+    # Set console I/O encodings
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false)
+
+    # Ensure external process encoding alignment (PowerShell 7+ honors $OutputEncoding)
+    $OutputEncoding = [Console]::OutputEncoding
+
+    # Switch Windows console code page to UTF-8 (65001) silently
+    & chcp.com 65001 | Out-Null
+} catch {
+    # Non-fatal: continue with defaults if encoding setup fails
+}
+
 # Colors for output
 $Red = "Red"
 $Green = "Green"
@@ -118,6 +133,14 @@ function Test-VMRunGuestSyntax {
         return $script:VMRUN_GUEST_SYNTAX
     }
     
+    # Quick check: ensure VMware Tools are running to avoid misleading errors
+    try {
+        $ts = (& $script:VMRUN_PATH -T ws checkToolsState $VmxPath 2>$null | Out-String).Trim()
+        if ($ts -and ($ts -notmatch "running")) {
+            Write-Info "VMware Tools state: $ts (guest commands may not work yet)"
+        }
+    } catch { }
+
     # Test different authentication syntaxes - credentials must come BEFORE runProgramInGuest
     $syntaxes = @(
         # Credentials before command
@@ -132,13 +155,13 @@ function Test-VMRunGuestSyntax {
         Write-Info "Testing $($syntax.Name) syntax..."
         try {
             if ($syntax.Mode -eq "Pre") {
-                $args = $syntax.Args + @("runProgramInGuest", $VmxPath, "/bin/echo", "test")
+                $args = $syntax.Args + @("runProgramInGuest", $VmxPath, "/bin/bash", "-lc", "echo vmrun_ok")
             } else {
                 # Alternate order: put credentials after the command as a workaround
                 if ($syntax.Name -like "*OldStyle*") {
-                    $args = @("-T", "ws", "runProgramInGuest", $VmxPath, "-guestUser", $script:GuestUser, "-guestPassword", $script:GuestPassword, "/bin/echo", "test")
+                    $args = @("-T", "ws", "runProgramInGuest", $VmxPath, "-guestUser", $script:GuestUser, "-guestPassword", $script:GuestPassword, "/bin/bash", "-lc", "echo vmrun_ok")
                 } else {
-                    $args = @("-T", "ws", "runProgramInGuest", $VmxPath, "-gu", $script:GuestUser, "-gp", $script:GuestPassword, "/bin/echo", "test")
+                    $args = @("-T", "ws", "runProgramInGuest", $VmxPath, "-gu", $script:GuestUser, "-gp", $script:GuestPassword, "/bin/bash", "-lc", "echo vmrun_ok")
                 }
             }
             
@@ -147,7 +170,7 @@ function Test-VMRunGuestSyntax {
                 param($vmrunPath, $args)
                 $output = & $vmrunPath @args 2>&1
                 $code = $LASTEXITCODE
-                if ($code -eq 0 -and $output -match "test") {
+                if ($code -eq 0 -and $output -match "vmrun_ok") {
                     return @{ ok = $true; output = $output }
                 } else {
                     return @{ ok = $false; output = $output }
@@ -184,6 +207,24 @@ function Test-VMRunGuestSyntax {
                 $msg = if ($null -ne $result) { $result.output } else { "(no output)" }
                 if ($msg -match "Usage:\\s*vmrun") {
                     Write-Info "$($syntax.Name) syntax invalid (usage shown)"
+                } elseif ($msg -match "The VMware Tools are not running") {
+                    Write-Info "Tools not running yet; guest commands unavailable"
+                } elseif ($msg -match "Invalid user name or password") {
+                    Write-Info "Guest authentication failed for $($script:GuestUser)"
+                } elseif ($msg -match "No such file or directory|not found") {
+                    Write-Info "Shell path may differ; trying runScriptInGuest fallback"
+                    try {
+                        # Fallback to runScriptInGuest to avoid PATH/shell issues
+                        $rsArgs = $syntax.Args + @("runScriptInGuest", $VmxPath, "/bin/bash", "echo vmrun_ok")
+                        $rsOut = & $script:VMRUN_PATH @rsArgs 2>&1
+                        if ($LASTEXITCODE -eq 0 -and $rsOut -match "vmrun_ok") {
+                            Write-Success "$($syntax.Name) runScriptInGuest fallback works!"
+                            $script:VMRUN_GUEST_SYNTAX = $syntax
+                            return $syntax
+                        } else {
+                            Write-Info "runScriptInGuest fallback failed: $rsOut"
+                        }
+                    } catch { Write-Info "runScriptInGuest fallback exception: $_" }
                 } else {
                     Write-Info "$($syntax.Name) syntax failed: $msg"
                 }
@@ -459,51 +500,36 @@ function Wait-ForVMReady {
     
     while ((Get-Date) -lt $timeout) {
         try {
-            # First, check if VM is in the running list
-            $vmStatus = & $script:VMRUN_PATH -T ws list 2>$null | Select-String $VmName
-            if (-not $vmStatus) {
-                if ($lastStatus -ne "not_in_list") {
-                    Write-Info "VM $VmName not found in running VMs list, waiting..."
-                    $lastStatus = "not_in_list"
-                }
-                Start-Sleep -Seconds 30
-                continue
+            # SSH-first readiness check (avoid vmrun guest commands)
+            if ($GuestIP) {
+                try {
+                    $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+                    $keyPath = Join-Path $repoRoot "wsl\out\ssh\id_rsa"
+                    $sshOpen = $false
+                    try { $sshOpen = Test-NetConnection -ComputerName $GuestIP -Port 22 -InformationLevel Quiet } catch { $sshOpen = $false }
+                    if ($sshOpen -and (Test-Path $keyPath)) {
+                        $sshArgs = @(
+                            "-i", $keyPath,
+                            "-o", "BatchMode=yes",
+                            "-o", "StrictHostKeyChecking=no",
+                            "-o", "UserKnownHostsFile=NUL",
+                            "-o", "ConnectTimeout=5",
+                            "ubuntu@$GuestIP",
+                            "bash", "-lc",
+                            "echo vm_ready"
+                        )
+                        $sshResult = & ssh @sshArgs 2>&1
+                        if ($LASTEXITCODE -eq 0 -and $sshResult -match "vm_ready") {
+                            Write-Success "VM $VmName is reachable via SSH"
+                            return $true
+                        }
+                    }
+                } catch { }
             }
             
-            # Check VMware Tools state
-            $toolsState = ""
-            try {
-                $toolsState = (& $script:VMRUN_PATH -T ws checkToolsState $VmxPath 2>$null | Out-String).Trim()
-            } catch {
-                $toolsState = "unknown"
-            }
-            
-            if ($toolsState -notmatch "running") {
-                if ($lastStatus -ne "tools:$toolsState") {
-                    Write-Info "VM $VmName tools state: $toolsState (waiting for 'running')"
-                    $lastStatus = "tools:$toolsState"
-                }
-                $toolsReadyTime = $null
-                Start-Sleep -Seconds 15
-                continue
-            }
-            
-            # Tools are running - record the time when they first became ready
-            if (-not $toolsReadyTime) {
-                $toolsReadyTime = Get-Date
-                Write-Info "VMware Tools are now running on $VmName, waiting for system stability..."
-            }
-            
-            # Ensure tools have been running for minimum time
-            $toolsRunTime = ((Get-Date) - $toolsReadyTime).TotalSeconds
-            if ($toolsRunTime -lt $minToolsWaitTime) {
-                if ($lastStatus -ne "tools_stabilizing") {
-                    Write-Info "VM $VmName stabilizing (tools running for $([int]$toolsRunTime)s, need $minToolsWaitTime s)"
-                    $lastStatus = "tools_stabilizing"
-                }
-                Start-Sleep -Seconds 10
-                continue
-            }
+            # Fallback: minimal sleep before next SSH attempt
+            Start-Sleep -Seconds 10
+            continue
             
             # Test guest connectivity if we haven't found working syntax yet and haven't attempted
             if (-not $guestSyntax -and -not $syntaxTestAttempted) {
@@ -515,32 +541,39 @@ function Wait-ForVMReady {
                     param($vmrunPath, $vmxPath, $guestUser, $guestPassword)
                     
                     # Test NewStyle syntax first (Pre)
-                    $args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword, "runProgramInGuest", $vmxPath, "/bin/echo", "test")
+                    $args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword, "runProgramInGuest", $vmxPath, "/bin/bash", "-lc", "echo vmrun_ok")
                     $result = & $vmrunPath @args 2>&1
-                    if ($LASTEXITCODE -eq 0 -and $result -match "test") {
+                    if ($LASTEXITCODE -eq 0 -and $result -match "vmrun_ok") {
                         return @{ Name = "NewStyle"; Args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword) }
                     }
                     
                     # Test OldStyle syntax (Pre)
-                    $args = @("-T", "ws", "-guestUser", $guestUser, "-guestPassword", $guestPassword, "runProgramInGuest", $vmxPath, "/bin/echo", "test")
+                    $args = @("-T", "ws", "-guestUser", $guestUser, "-guestPassword", $guestPassword, "runProgramInGuest", $vmxPath, "/bin/bash", "-lc", "echo vmrun_ok")
                     $result = & $vmrunPath @args 2>&1
-                    if ($LASTEXITCODE -eq 0 -and $result -match "test") {
+                    if ($LASTEXITCODE -eq 0 -and $result -match "vmrun_ok") {
                         return @{ Name = "OldStyle"; Args = @("-T", "ws", "-guestUser", $guestUser, "-guestPassword", $guestPassword) }
                     }
 
                     # Test alternate order (Post) - command before credentials
-                    $args = @("-T", "ws", "runProgramInGuest", $vmxPath, "-gu", $guestUser, "-gp", $guestPassword, "/bin/echo", "test")
+                    $args = @("-T", "ws", "runProgramInGuest", $vmxPath, "-gu", $guestUser, "-gp", $guestPassword, "/bin/bash", "-lc", "echo vmrun_ok")
                     $result = & $vmrunPath @args 2>&1
-                    if ($LASTEXITCODE -eq 0 -and $result -match "test") {
+                    if ($LASTEXITCODE -eq 0 -and $result -match "vmrun_ok") {
                         return @{ Name = "NewStyleAlt"; Args = @("-T", "ws", "runProgramInGuest", $vmxPath, "-gu", $guestUser, "-gp", $guestPassword) }
                     }
 
-                    $args = @("-T", "ws", "runProgramInGuest", $vmxPath, "-guestUser", $guestUser, "-guestPassword", $guestPassword, "/bin/echo", "test")
+                    $args = @("-T", "ws", "runProgramInGuest", $vmxPath, "-guestUser", $guestUser, "-guestPassword", $guestPassword, "/bin/bash", "-lc", "echo vmrun_ok")
                     $result = & $vmrunPath @args 2>&1
-                    if ($LASTEXITCODE -eq 0 -and $result -match "test") {
+                    if ($LASTEXITCODE -eq 0 -and $result -match "vmrun_ok") {
                         return @{ Name = "OldStyleAlt"; Args = @("-T", "ws", "runProgramInGuest", $vmxPath, "-guestUser", $guestUser, "-guestPassword", $guestPassword) }
                     }
                     
+                    # Fallback: runScriptInGuest with standard auth flags
+                    $args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword, "runScriptInGuest", $vmxPath, "/bin/bash", "echo vmrun_ok")
+                    $result = & $vmrunPath @args 2>&1
+                    if ($LASTEXITCODE -eq 0 -and $result -match "vmrun_ok") {
+                        return @{ Name = "NewStyle"; Args = @("-T", "ws", "-gu", $guestUser, "-gp", $guestPassword) }
+                    }
+
                     return $null
                 } -ArgumentList $script:VMRUN_PATH, $VmxPath, $script:GuestUser, $script:GuestPassword
                 
@@ -582,14 +615,14 @@ function Wait-ForVMReady {
                     $args = $null
                     if ($guestSyntax['Name'] -like "*Alt") {
                         # Alternate order stored with full prebuilt prefix in Args
-                        $args = @($guestSyntax['Args'] + @("/bin/echo", "test"))
+                        $args = @($guestSyntax['Args'] + @("/bin/bash", "-lc", "echo vmrun_ok"))
                     } else {
                         # Default: auth flags before command
-                        $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/echo", "test")
+                        $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/bash", "-lc", "echo vmrun_ok")
                     }
                     $testResult = & $script:VMRUN_PATH @args 2>&1
                     
-                    if ($LASTEXITCODE -eq 0 -and $testResult -match "test") {
+                    if ($LASTEXITCODE -eq 0 -and $testResult -match "vmrun_ok") {
                         Write-Success "VM $VmName is ready for guest operations"
                         return $true
                     } elseif ($LASTEXITCODE -ne 0) {
@@ -655,7 +688,60 @@ function Check-CompletionStatus {
     
     Write-Info "Checking completion status for ${VmName}..."
     
+    # Determine completion criteria based on VM role and marker timing
+    # We consider initialization complete only when k3s bootstrap markers exist (master/worker).
+    # Cloud-init and ISO copy markers are earlier-stage signals and are NOT sufficient for completion.
+    $completionShellCmd = $null
     try {
+        if ($VmName -match "master") {
+            $completionShellCmd = "test -f /var/lib/k3s-bootstrap.done && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
+        } elseif ($VmName -match "worker") {
+            $completionShellCmd = "test -f /var/lib/k3s-agent-bootstrap.done && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
+        } else {
+            # Fallback: accept either master or worker bootstrap marker
+            $completionShellCmd = "(test -f /var/lib/k3s-bootstrap.done || test -f /var/lib/k3s-agent-bootstrap.done) && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
+        }
+    } catch { $completionShellCmd = "echo STATE_INCOMPLETE" }
+
+    try {
+        # SSH-only completion check path (bypass vmrun guest commands)
+        if ($GuestIP) {
+            Write-Info "Using SSH-only completion check for ${VmName} (${GuestIP})"
+            try {
+                $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+                $keyPath = Join-Path $repoRoot "wsl\out\ssh\id_rsa"
+                if (Test-Path $keyPath) {
+                    $sshArgs = @(
+                        "-i", $keyPath,
+                        "-o", "BatchMode=yes",
+                        "-o", "StrictHostKeyChecking=no",
+                        "-o", "UserKnownHostsFile=NUL",
+                        "-o", "ConnectTimeout=5",
+                        "ubuntu@$GuestIP",
+                        "bash", "-lc",
+                        $completionShellCmd
+                    )
+                    $sshResult = & ssh @sshArgs 2>&1
+                    if ($LASTEXITCODE -eq 0 -and $sshResult -match "STATE_COMPLETE") {
+                        Write-Success "Initialization completion confirmed via SSH for ${VmName}"
+                        return $true
+                    } else {
+                        Write-Info "SSH did not confirm completion for ${VmName}: $sshResult"
+                        return $false
+                    }
+                } else {
+                    Write-Info "SSH key not found at $keyPath; cannot perform SSH completion check for ${VmName}"
+                    return $false
+                }
+            } catch {
+                Write-Info "SSH completion check failed for ${VmName}: $_"
+                return $false
+            }
+        } else {
+            Write-Info "Guest IP not provided; cannot perform SSH completion check for ${VmName}"
+            return $false
+        }
+
         # Test guest syntax first if not already known
         $guestSyntax = Test-VMRunGuestSyntax -VmxPath $VmxPath
         if (-not $guestSyntax) {
@@ -672,11 +758,11 @@ function Check-CompletionStatus {
                             "-o", "ConnectTimeout=5",
                             "ubuntu@$GuestIP",
                             "bash", "-lc",
-                            "test -f /var/lib/iso-copy-complete && echo COPY_COMPLETE || echo COPY_INCOMPLETE"
+                            $completionShellCmd
                         )
                         $sshResult = & ssh @sshArgs 2>&1
-                        if ($LASTEXITCODE -eq 0 -and $sshResult -match "COPY_COMPLETE") {
-                            Write-Success "ISO copy completion confirmed via SSH for ${VmName}"
+                        if ($LASTEXITCODE -eq 0 -and $sshResult -match "STATE_COMPLETE") {
+                            Write-Success "Initialization completion confirmed via SSH for ${VmName}"
                             return $true
                         } else {
                             Write-Info "SSH fallback did not confirm completion for ${VmName}: $sshResult"
@@ -700,13 +786,13 @@ function Check-CompletionStatus {
         if ($LASTEXITCODE -eq 0 -and $testResult -match "connection_test") {
             Write-Success "Guest connectivity confirmed for ${VmName}"
             
-            # Now check for completion indicators
+            # Now check for completion indicators (multiple signals)
             # Keep auth flags before the command
-            $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/bash", "-c", "test -f /var/lib/iso-copy-complete && echo 'COPY_COMPLETE' || echo 'COPY_INCOMPLETE'")
+            $args = $guestSyntax['Args'] + @("runProgramInGuest", $VmxPath, "/bin/bash", "-lc", $completionShellCmd)
             $completionResult = & $script:VMRUN_PATH @args 2>&1
             
-            if ($completionResult -match "COPY_COMPLETE") {
-                Write-Success "ISO copy completion confirmed for ${VmName}"
+            if ($completionResult -match "STATE_COMPLETE") {
+                Write-Success "Initialization completion confirmed for ${VmName}"
                 return $true
             } else {
                 Write-Info "ISO copy still in progress for ${VmName}"
@@ -730,11 +816,11 @@ function Check-CompletionStatus {
                             "-o", "ConnectTimeout=5",
                             "ubuntu@$GuestIP",
                             "bash", "-lc",
-                            "test -f /var/lib/iso-copy-complete && echo COPY_COMPLETE || echo COPY_INCOMPLETE"
+                            $completionShellCmd
                         )
                         $sshResult = & ssh @sshArgs 2>&1
-                        if ($LASTEXITCODE -eq 0 -and $sshResult -match "COPY_COMPLETE") {
-                            Write-Success "ISO copy completion confirmed via SSH for ${VmName}"
+                        if ($LASTEXITCODE -eq 0 -and $sshResult -match "STATE_COMPLETE") {
+                            Write-Success "Initialization completion confirmed via SSH for ${VmName}"
                             return $true
                         } else {
                             Write-Info "SSH fallback did not confirm completion for ${VmName}: $sshResult"
@@ -964,7 +1050,8 @@ try {
             Start-Stage "Monitor initialization completion"
             Write-Info "Monitoring completion status for VMs..."
             $completionCheckTime = 0
-            $maxCompletionWaitMinutes = 20
+            # Reduce completion monitor wait and rely on SSH-based signals for faster exit
+            $maxCompletionWaitMinutes = 10
             
             while ($completionCheckTime -lt ($maxCompletionWaitMinutes * 60)) {
                 $allComplete = $true
@@ -987,13 +1074,13 @@ try {
                 }
                 
                 Write-Info "Waiting for VM initialization to complete... ($([int]($completionCheckTime/60)) min elapsed)"
-                Start-Sleep -Seconds 60
-                $completionCheckTime += 60
+                Start-Sleep -Seconds 20
+                $completionCheckTime += 20
             }
             
             if ($completionCheckTime -ge ($maxCompletionWaitMinutes * 60)) {
                 Write-Warning "Timeout waiting for VM initialization completion after $maxCompletionWaitMinutes minutes"
-                Write-Info "VMs may still be initializing in the background"
+                Write-Info "Proceeding with ISO disconnect and restart; VMs may still be finalizing setup"
             }
             End-Stage "Monitor initialization completion"
         } else {

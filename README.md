@@ -698,6 +698,23 @@ vmrun -T ws runProgramInGuest "C:\path\vm.vmx" -gu <guestUser> -gp <guestPasswor
 
 추가로, 게스트 명령이 모두 실패할 경우에는 VMware Tools 상태, 게스트 IP(`getGuestIPAddress -wait`), SSH(포트 22 응답/키 기반 접속) 등의 신호를 기반으로 준비/완료 상태를 판정합니다.
 
+##### SSH 폴백 완료 판정 파싱 오류(워크어라운드)
+일부 환경에서 Windows PowerShell → `ssh.exe` → `bash -lc`로 명령이 전달될 때, if/then/fi 구문이 인용 경계 문제로 파싱 오류를 일으켜 완료 판정이 실패할 수 있습니다.
+
+- 증상: `bash: -c: line 1: syntax error near unexpected token 'then'`
+- 원인: 다중 레이어 인용 처리에서 if 블록이 깨짐
+- 해결: if 블록 대신 안전한 one-liner를 사용
+
+```bash
+# 변경 전 (권장하지 않음)
+if [ -f /var/lib/iso-copy-complete ] || [ -f /var/lib/cloud-init-complete ] || [ -f /var/lib/k3s-bootstrap.done ] || [ -f /var/lib/k3s-agent-bootstrap.done ]; then echo STATE_COMPLETE; else echo STATE_INCOMPLETE; fi
+
+# 변경 후 (권장)
+test -f /var/lib/iso-copy-complete || test -f /var/lib/cloud-init-complete || test -f /var/lib/k3s-bootstrap.done || test -f /var/lib/k3s-agent-bootstrap.done && echo STATE_COMPLETE || echo STATE_INCOMPLETE
+```
+
+본 변경은 `windows/Setup-VMs.ps1`에 반영되어 있으며, vmrun 게스트 명령이 불가능한 환경에서도 SSH 폴백으로 안정적으로 완료 여부를 확인할 수 있습니다.
+
 #### 권한 문제
 ```powershell
 # 관리자 권한으로 PowerShell 실행
@@ -1137,3 +1154,23 @@ docker images | grep k3s
 +  - VM 준비 상태 확인 (vmrun 명령어 구문 오류 해결)
 +- **수정된 파일들**: `user-data-master.tpl`, `user-data-worker.tpl`, `01_build_seed_isos.sh`, `Setup-VMs.ps1`
 +- **영향**: 완전 자동화된 VM 및 k3s 클러스터 생성, 수동 개입 불필요
+
+## Windows 콘솔 한글 출력 이슈(중요)
+
+일부 Windows 환경에서 PowerShell 실행 로그의 한글이 "완완료료", "단단계계별별"처럼 중복 표시될 수 있습니다. 이는 콘솔 코드페이지와 출력 인코딩이 UTF-8과 불일치할 때 발생합니다. 아래와 같이 UTF-8로 강제 설정하면 해결됩니다.
+
+```powershell
+# PowerShell 세션에서 실행
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+chcp 65001 | Out-Null
+```
+
+본 프로젝트의 `windows/Setup-VMs.ps1`에는 위 설정이 자동으로 포함되어 있어, 스크립트 실행만으로 문제를 피할 수 있습니다.
+
+##### vmrun 점검/폴백 로직(추가)
+- 점검/검증 명령은 `/bin/bash -lc 'echo vmrun_ok'`를 사용하여 PATH/쉘 차이로 인한 실패를 방지합니다.
+- `runProgramInGuest` 실패 시 `runScriptInGuest`로 동일 검증을 재시도하는 폴백 경로가 있습니다.
+- `checkToolsState`로 VMware Tools 상태를 먼저 확인하여 `Tools not running`/`Invalid user name or password`/`Usage`를 로그로 구분합니다.
+- Tools 미기동 시 대기 백오프: 10초 → 20초 → 30초(상한)로 재시도 간격을 점진적으로 늘립니다.
