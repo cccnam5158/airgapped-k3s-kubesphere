@@ -1,4 +1,4 @@
-# Simple VM Status Check Script
+﻿# Simple VM Status Check Script
 # This script checks VM status without complex guest operations
 
 param(

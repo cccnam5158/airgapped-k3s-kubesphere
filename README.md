@@ -681,6 +681,23 @@ $env:PATH += ";C:\Program Files (x86)\VMware\VMware Workstation\bin"
 vmrun -T ws list
 ```
 
+##### vmrun 인자 순서 호환성(워크어라운드)
+일부 환경에서 `vmrun`이 게스트 명령 실행 시 인증 플래그의 위치를 엄격히 해석하지 못하는 문제가 보고되었습니다. 본 프로젝트 스크립트(`windows/Setup-VMs.ps1`)는 다음 두 가지 양식을 모두 시도하고, 최초 성공한 양식을 캐시하여 이후 호출에 재사용합니다.
+
+1) 표준 양식(권장): 인증 플래그가 명령 앞에 위치
+
+```powershell
+vmrun -T ws -gu <guestUser> -gp <guestPassword> runProgramInGuest "C:\path\vm.vmx" "/bin/echo" test
+```
+
+2) 대체 양식(워크어라운드): 명령 뒤에 인증 플래그를 배치
+
+```powershell
+vmrun -T ws runProgramInGuest "C:\path\vm.vmx" -gu <guestUser> -gp <guestPassword> "/bin/echo" test
+```
+
+추가로, 게스트 명령이 모두 실패할 경우에는 VMware Tools 상태, 게스트 IP(`getGuestIPAddress -wait`), SSH(포트 22 응답/키 기반 접속) 등의 신호를 기반으로 준비/완료 상태를 판정합니다.
+
 #### 권한 문제
 ```powershell
 # 관리자 권한으로 PowerShell 실행
@@ -885,9 +902,21 @@ docker images --digests
 ### 보안 고려사항
 - **SSH 키 기반 인증**: 패스워드 인증 완전 비활성화, SSH 키만 사용
 - **루트 로그인 비활성화**: 보안 강화를 위해 root 계정 SSH 로그인 차단
-- **TLS 인증서**: 프라이빗 레지스트리용 자체 서명 인증서
+- **TLS 인증서**: 프라이빗 레지스트리용 자체 서명 인증서 (SAN 포함)
 - **네트워크 격리**: Host-Only 네트워크 사용
 - **최소 권한**: 필요한 최소 권한만 부여
+
+### 레지스트리 TLS SAN 문제와 해결 (중요)
+- **증상**: 워커에서 `curl https://192.168.6.1:5000/v2/` 또는 kubelet 이미지 pull 시 `connection reset by peer` 발생.
+- **원인**: 레지스트리 인증서가 `CN=localhost`로 생성되고 `SubjectAltName`에 `192.168.6.1`이 없어 TLS 이름검증 실패.
+- **해결**:
+  1) WSL에서 `wsl/scripts/00_prep_offline_fixed.sh` 실행 시 SAN 포함 인증서가 자동 생성됨(CN=`${REGISTRY_HOST_IP}`, SAN=`IP:${REGISTRY_HOST_IP},IP:127.0.0.1,DNS:localhost`).
+  2) 생성된 `out/certs/airgap-registry-ca.crt`가 시드에 포함되어 VM 부팅 시 `/usr/local/share/ca-certificates/`로 복사되고 `update-ca-certificates`가 실행됨.
+  3) `registries.yaml`도 VM 접근 주소(`https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}`)로 자동 생성/배포됨.
+- **검증**:
+  - VM: `openssl s_client -connect 192.168.6.1:5000 -servername 192.168.6.1 -showcerts </dev/null | openssl x509 -noout -subject -ext subjectAltName`
+  - VM: `curl -vk https://192.168.6.1:5000/v2/`
+  - 클러스터: `kubectl -n kube-system get pods` 에서 `local-path-provisioner`가 Running 전환
 
 ## 📞 지원
 
@@ -911,6 +940,19 @@ docker images --digests
 - **IP 대역**: 192.168.6.x (통일된 네트워크 설정)
 
 ## 🔧 최근 변경사항
+### 2025-09-02: Setup-VMs 가속 및 신뢰도 개선 (중요)
+- `windows/Setup-VMs.ps1`
+  - VM 준비 대기 고정시간 300s → 120s로 축소, IP/SSH 신호 기반 조기 종료
+  - `vmrun` 대체 인자 순서(명령 뒤 `-gu/-gp`) 자동 시도 및 캐시
+  - 게스트 명령 실패 시 SSH 폴백으로 완료 파일(`/var/lib/iso-copy-complete`) 확인
+  - 워커 ISO 분리 병렬 처리, 불필요한 대기 시간 축소
+- 예상 효과: 전체 실행 시간 단축(환경에 따라 6~9분 수준), 완료 판정 정확도 향상
+
+### 2025-09-02: K3s 기본 컴포넌트 활성화 (중요)
+- 변경: `wsl/templates/user-data-master.tpl`에서 K3s `config.yaml` 생성 시 `disable` 항목(`traefik`, `servicelb`) 제거하여 기본 컴포넌트가 자동 배포되도록 수정
+- 영향: Traefik(Ingress), ServiceLB, local-path-provisioner, CoreDNS, metrics-server, pause 등이 기본값대로 배포됨
+- 검증: `kubectl -n kube-system get pods -o wide`, `sudo k3s ctr images ls`
+
 ### 2025-09-01: 마스터 템플릿 런타임 변수 이스케이프 수정 (중요)
 - **문제**: `user-data-master.tpl`에서 `setup-k3s-master.sh`의 `${SEED_BASE}`가 ISO 빌드 시 `envsubst`로 비워져 k3s 복사 단계가 실패할 수 있음
 - **해결**: 2025-09-01에 `setup-k3s-master.sh` 스크립트의 SRC 변수 설정 및 SEED_BASE 검증 로직 개선
