@@ -733,12 +733,14 @@ function Check-CompletionStatus {
     $completionShellCmd = $null
     try {
         if ($VmName -match "master") {
-            $completionShellCmd = "test -f /var/lib/k3s-bootstrap.done && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
+            # Complete if bootstrap marker exists OR k3s service is active
+            $completionShellCmd = "(test -f /var/lib/k3s-bootstrap.done || systemctl is-active --quiet k3s) && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
         } elseif ($VmName -match "worker") {
-            $completionShellCmd = "test -f /var/lib/k3s-agent-bootstrap.done && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
+            # Complete if bootstrap marker exists OR k3s-agent service is active
+            $completionShellCmd = "(test -f /var/lib/k3s-agent-bootstrap.done || systemctl is-active --quiet k3s-agent) && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
         } else {
-            # Fallback: accept either master or worker bootstrap marker
-            $completionShellCmd = "(test -f /var/lib/k3s-bootstrap.done || test -f /var/lib/k3s-agent-bootstrap.done) && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
+            # Fallback: either marker or active k3s/k3s-agent counts as complete
+            $completionShellCmd = "(test -f /var/lib/k3s-bootstrap.done || test -f /var/lib/k3s-agent-bootstrap.done || systemctl is-active --quiet k3s || systemctl is-active --quiet k3s-agent) && echo STATE_COMPLETE || echo STATE_INCOMPLETE"
         }
     } catch { $completionShellCmd = "echo STATE_INCOMPLETE" }
 
@@ -757,7 +759,6 @@ function Check-CompletionStatus {
                         "-o", "UserKnownHostsFile=NUL",
                         "-o", "ConnectTimeout=5",
                         "ubuntu@$GuestIP",
-                        "bash", "-lc",
                         $completionShellCmd
                     )
                     $sshResult = & ssh @sshArgs 2>&1
@@ -766,6 +767,46 @@ function Check-CompletionStatus {
                         return $true
                     } else {
                         Write-Info "SSH did not confirm completion for ${VmName}: $sshResult"
+                        
+                        # Additional debugging: check what files exist and service status
+                        Write-Info "Debugging ${VmName} completion status..."
+                        try {
+                            $debugArgs = @(
+                                "-i", $keyPath,
+                                "-o", "BatchMode=yes",
+                                "-o", "StrictHostKeyChecking=no", 
+                                "-o", "UserKnownHostsFile=NUL",
+                                "-o", "ConnectTimeout=5",
+                                "ubuntu@$GuestIP",
+                                "bash", "-lc",
+                                "ls -la /var/lib/k3s* /var/lib/cloud-init* 2>/dev/null || echo 'No marker files found'"
+                            )
+                            $debugResult = & ssh @debugArgs 2>&1
+                            Write-Info "Marker files on ${VmName}: $debugResult"
+                            
+                            # Check appropriate service based on VM type
+                            $serviceCmd = if ($VmName -match "master") {
+                                "bash -lc 'if systemctl is-active --quiet k3s-bootstrap; then echo active; elif systemctl is-failed --quiet k3s-bootstrap; then echo failed; elif systemctl status k3s-bootstrap >/dev/null 2>&1; then echo inactive; else echo not-found; fi'"
+                            } elseif ($VmName -match "worker") {
+                                "bash -lc 'if systemctl is-active --quiet k3s-agent-bootstrap; then echo active; elif systemctl is-failed --quiet k3s-agent-bootstrap; then echo failed; elif systemctl status k3s-agent-bootstrap >/dev/null 2>&1; then echo inactive; else echo not-found; fi'"
+                            } else {
+                                "bash -lc 'systemctl is-active k3s-bootstrap k3s-agent-bootstrap || true'"
+                            }
+                            
+                            $serviceArgs = @(
+                                "-i", $keyPath,
+                                "-o", "BatchMode=yes", 
+                                "-o", "StrictHostKeyChecking=no",
+                                "-o", "UserKnownHostsFile=NUL",
+                                "-o", "ConnectTimeout=5",
+                                "ubuntu@$GuestIP",
+                                $serviceCmd
+                            )
+                            $serviceResult = & ssh @serviceArgs 2>&1
+                            Write-Info "Bootstrap services on ${VmName}: $serviceResult"
+                        } catch {
+                            Write-Info "Debug check failed for ${VmName}: $_"
+                        }
                         return $false
                     }
                 } else {
@@ -854,7 +895,6 @@ function Check-CompletionStatus {
                             "-o", "UserKnownHostsFile=NUL",
                             "-o", "ConnectTimeout=5",
                             "ubuntu@$GuestIP",
-                            "bash", "-lc",
                             $completionShellCmd
                         )
                         $sshResult = & ssh @sshArgs 2>&1

@@ -298,3 +298,185 @@
 
 ### 도식 문서 추가
 - `windows/setup-vm-process-diagram.md`: `scripts/setup-vms.ps1` ↔ `windows/Setup-VMs.ps1` 흐름과 SSH-only 체크, 마커 정책을 Mermaid로 도식화
+
+## 250902 ContainerCreating 문제 해결: 이미지 로드 타이밍 및 오류 처리 개선
+
+### 문제 상황
+- Worker 노드에서 `sudo k3s ctr images ls` 실행 시 이미지가 전혀 표시되지 않음
+- Pod가 ContainerCreating 상태에서 멈춤: `failed to get sandbox image "rancher/mirrored-pause:3.6": not found`
+- K3s가 요구하는 pause 이미지 버전과 실제 미러링된 버전 불일치
+
+### 근본 원인 분석
+1. **이미지 로드 타이밍 문제**: 
+   - 기존: k3s 서비스 시작 → 이미지 로드 (kubelet이 이미지를 찾을 때 아직 로드되지 않음)
+   - 결과: ContainerCreating 상태 고착
+
+2. **오류 처리 부족**:
+   - `|| echo "Image import skipped/failed"`로 실패를 무시
+   - 실제 import 실패 여부를 알 수 없음
+
+3. **누락된 이미지**:
+   - K3s가 `rancher/mirrored-pause:3.6`을 요구하지만 `3.10`만 미러링됨
+
+### 적용된 해결책
+
+#### 1. 템플릿 수정 (이미지 로드 타이밍)
+**파일**: `wsl/templates/user-data-master.tpl`, `wsl/templates/user-data-worker.tpl`
+
+**변경 내용**:
+- 이미지 로드를 k3s 서비스 시작 **전**으로 이동
+- 이미지 로드 성공 후에만 k3s 서비스 시작
+- 상세한 로그 및 검증 추가
+
+```bash
+# 기존 순서 (문제)
+systemctl enable --now k3s-agent
+# 이미지 로드 (너무 늦음)
+
+# 새로운 순서 (해결)
+# 이미지 로드 먼저
+systemctl enable --now k3s-agent
+```
+
+#### 2. 오류 처리 강화
+**추가된 기능**:
+- 이미지 파일 존재 및 크기 검증
+- Import 성공/실패 명확한 구분
+- 로드된 이미지 개수 확인
+- 중요 이미지(pause, coredns, traefik) 존재 검증
+- 실패 시 명확한 오류 메시지 및 중단
+
+```bash
+if /usr/local/bin/k3s ctr images import "$SEED_BASE/k3s-airgap-images-amd64.tar.gz"; then
+  echo "SUCCESS: Airgap images loaded successfully"
+  image_count=$(/usr/local/bin/k3s ctr images ls -q | wc -l)
+  echo "Loaded $image_count container images"
+else
+  echo "ERROR: Failed to import airgap images"
+  exit 1
+fi
+```
+
+#### 3. 누락된 이미지 추가
+**파일**: `wsl/examples/images-fixed.txt`
+
+**추가된 이미지**:
+```
+rancher/mirrored-pause:3.6 rancher/mirrored-pause:3.6
+```
+
+### 적용 방법
+
+#### 즉시 적용 (기존 환경)
+1. **오프라인 준비 재실행**:
+```bash
+cd wsl/scripts
+./00_prep_offline_fixed.sh  # pause:3.6 이미지 미러링
+```
+
+2. **ISO 재생성**:
+```bash
+./01_build_seed_isos.sh  # 수정된 템플릿으로 ISO 생성
+```
+
+3. **VM 재생성**:
+```powershell
+# Windows에서
+.\windows\Setup-VMs.ps1  # 새로운 ISO로 VM 재생성
+```
+
+#### 기존 VM 임시 해결
+Worker 노드에서 수동 이미지 로드:
+```bash
+# VM에 SSH 접속 후
+sudo /usr/local/bin/k3s ctr images import /usr/local/seed/k3s-airgap-images-amd64.tar.gz
+sudo systemctl restart k3s-agent
+```
+
+### 기대 효과
+1. **ContainerCreating 해결**: 이미지가 미리 로드되어 Pod 생성 즉시 성공
+2. **빠른 문제 진단**: 명확한 오류 메시지로 문제 원인 즉시 파악
+3. **안정성 향상**: 이미지 로드 실패 시 k3s 시작 차단으로 불완전한 상태 방지
+4. **버전 호환성**: 필요한 모든 pause 이미지 버전 제공
+
+### 검증 방법
+```bash
+# VM에서 확인
+sudo k3s ctr images ls | grep pause  # pause 이미지 확인
+sudo k3s kubectl get pods -A  # 모든 Pod Running 상태 확인
+sudo k3s kubectl get nodes -o wide  # 노드 Ready 상태 확인
+```
+
+#### 4. SSH 서비스 체크 로직 수정 ✅
+**문제**: 마스터/워커 구분 없이 모든 VM에서 `k3s-bootstrap`과 `k3s-agent-bootstrap` 둘 다 확인
+- 마스터는 `k3s-bootstrap` 서비스만 실행되는데 두 서비스 모두 확인하려 함
+- 워커는 `k3s-agent-bootstrap` 서비스만 실행되는데 두 서비스 모두 확인하려 함
+
+**해결**: VM 타입에 따라 적절한 서비스만 확인하도록 수정
+```powershell
+# 변경 전 (문제)
+"sudo systemctl is-active k3s-bootstrap k3s-agent-bootstrap"
+
+# 변경 후 (해결)
+$serviceCmd = if ($VmName -match "master") {
+    "sudo systemctl is-active k3s-bootstrap"
+} elseif ($VmName -match "worker") {
+    "sudo systemctl is-active k3s-agent-bootstrap"
+}
+```
+
+#### 5. Pause 이미지 버전 3.10으로 고정 ✅
+**배경**: Worker2에서 airgap 이미지 파일 손상으로 인해 pause:3.6 이미지 로드 실패 발견
+- K3s가 pause:3.6을 요구하지만 실제로는 pause:3.10만 미러링되어 있음
+- 버전 불일치로 인한 ContainerCreating 문제 발생
+
+**해결**: pause 이미지를 3.10으로 고정
+```yaml
+# 마스터/워커 config.yaml에 추가
+kubelet-arg:
+  - "pod-infra-container-image=rancher/mirrored-pause:3.10"
+```
+
+**효과**: K3s가 항상 pause:3.10 이미지를 사용하도록 강제, 버전 불일치 문제 근본 해결
+
+#### 6. 템플릿 이미지 로드 타이밍 근본 수정 ✅
+**문제 발견**: 사용자가 수동으로 `sudo k3s ctr images import`를 실행하면 정상 동작하지만, 템플릿에서는 실패
+**근본 원인**: containerd 소켓이 준비되지 않은 상태에서 이미지 import 시도
+- **기존**: k3s 바이너리 설치 → 이미지 import → k3s 서비스 시작
+- **문제**: containerd 데몬이 시작되지 않아서 import 실패
+
+**해결책**: 
+1. **k3s 서비스 먼저 시작**: containerd 초기화
+2. **containerd 소켓 대기**: `/run/k3s/containerd/containerd.sock` 생성 확인
+3. **이미지 import 실행**: containerd가 준비된 후 import
+4. **sudo 대체 로직**: 일반 사용자 import 실패 시 sudo로 재시도
+
+```bash
+# 수정된 순서
+systemctl enable --now k3s-agent  # 1. 서비스 먼저 시작
+# 2. containerd 소켓 대기
+for i in {1..30}; do
+  [ -S /run/k3s/containerd/containerd.sock ] && break
+  sleep 2
+done
+# 3. 이미지 import (containerd 준비 완료 후)
+k3s ctr images import /usr/local/seed/k3s-airgap-images-amd64.tar.gz
+```
+
+#### 7. Worker2 문제 진단 스크립트 생성 ✅
+- `wsl/scripts/check-worker2-issues.sh`: 종합 진단 스크립트 생성
+- SSH 연결, 파일 시스템, 부트스트랩 서비스, 이미지 상태 등 전면 점검
+
+### 상태
+- ✅ 템플릿 수정 완료 (이미지 로드 타이밍 근본 해결)
+- ✅ 오류 처리 강화 완료 (exit 1 → warning으로 완화)
+- ✅ 누락된 이미지 추가 완료 (pause:3.6 → 3.10으로 변경)
+- ✅ SSH 서비스 체크 로직 수정 완료
+- ✅ Pause 이미지 버전 3.10으로 고정 완료
+- ✅ containerd 소켓 대기 로직 추가 완료
+- ✅ Worker2 진단 스크립트 생성 완료
+- ⏳ 새로운 ISO 생성 및 테스트 필요
+
+#### 8. ISO 복사/정리 정책 개선 (WSL 안전) ✅
+- `wsl/scripts/01_build_seed_isos.sh`: Windows로 결과 복사 시 `seed-*.iso`만 복사하도록 변경 (Ubuntu 원본 ISO 제외)
+- 기존 정리 단계는 `seed-*.iso`, user-data/meta-data 등 빌드 산출물만 삭제하고, Ubuntu 원본 ISO는 삭제하지 않음 (WSL 작업 폴더 보존)

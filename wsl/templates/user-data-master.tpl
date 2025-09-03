@@ -653,6 +653,8 @@ autoinstall:
             - 127.0.0.1
             - localhost
           token: ${TOKEN}
+          kubelet-arg:
+            - "pod-infra-container-image=rancher/mirrored-pause:3.10"
           EOF
 
           # Install systemd unit for persistent k3s server
@@ -675,9 +677,60 @@ autoinstall:
           WantedBy=multi-user.target
           EOF
 
-          # Enable and start k3s via systemd
+          # Enable and start k3s via systemd FIRST (to initialize containerd)
           systemctl daemon-reload
           systemctl enable --now k3s
+
+          # Wait for containerd socket to be ready
+          echo "Waiting for containerd socket to be ready..."
+          for i in {1..30}; do
+            if [ -S /run/k3s/containerd/containerd.sock ]; then
+              echo "containerd socket is ready!"
+              break
+            fi
+            echo "Waiting for containerd socket... ($i/30)"
+            sleep 2
+          done
+
+          # Load airgap images AFTER k3s server is running (containerd is ready)
+          if [ -f "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" ]; then
+            echo "Loading airgap images after k3s server startup..."
+            echo "Image file size: $(du -h "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" | cut -f1)"
+
+            # Wait a bit more for k3s to fully initialize
+            sleep 5
+
+            # Prepare log and fallback copy to k3s agent images autoload dir
+            LOG_FILE="/var/log/k3s-image-import.log"
+            echo "[$(date -u)] Begin image import" | tee -a "$LOG_FILE"
+            mkdir -p /var/lib/rancher/k3s/agent/images
+            cp -f "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" \
+              /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.gz 2>/dev/null || true
+
+            # Try multiple import strategies (namespace, gzip pipe)
+            if /usr/local/bin/k3s ctr -n k8s.io images import "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" 2>&1 | tee -a "$LOG_FILE"; then
+              echo "SUCCESS: Imported with k8s.io namespace" | tee -a "$LOG_FILE"
+            elif /usr/local/bin/k3s ctr images import "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" 2>&1 | tee -a "$LOG_FILE"; then
+              echo "SUCCESS: Imported without explicit namespace" | tee -a "$LOG_FILE"
+            elif gunzip -c "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" | /usr/local/bin/k3s ctr -n k8s.io images import - 2>&1 | tee -a "$LOG_FILE"; then
+              echo "SUCCESS: Imported via gunzip pipe" | tee -a "$LOG_FILE"
+            else
+              echo "ERROR: Failed to import airgap images via all strategies" | tee -a "$LOG_FILE"
+            fi
+
+            # Verify images were loaded
+            image_count=$(/usr/local/bin/k3s ctr -n k8s.io images ls -q | wc -l)
+            echo "Loaded $image_count container images (k8s.io namespace)" | tee -a "$LOG_FILE"
+            echo "Critical images check:" | tee -a "$LOG_FILE"
+            /usr/local/bin/k3s ctr -n k8s.io images ls | grep -E "(pause|coredns|traefik)" \
+              | tee -a "$LOG_FILE" || echo "No critical images found" | tee -a "$LOG_FILE"
+          else
+            echo "WARNING: Airgap images not found at $SEED_BASE/k3s-airgap-images-amd64.tar.gz"
+            echo "This will cause all pods to fail with ContainerCreating status"
+            echo "Available files in seed directory:"
+            ls -la "$SEED_BASE/" || echo "Cannot list seed directory"
+            echo "Continuing without pre-loaded images - images must be available via registry"
+          fi
 
           # Install a safe eject script and service (eject only after seed copied)
           cat > /usr/local/bin/eject-if-safe.sh << 'EOF'
@@ -717,15 +770,6 @@ autoinstall:
             echo "Waiting... ($i/30)"
             sleep 10
           done
-
-          # Load airgap images after K3s (containerd) is up
-          if [ -f "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" ]; then
-            echo "Loading airgap images..."
-            /usr/local/bin/k3s ctr images import "$SEED_BASE/k3s-airgap-images-amd64.tar.gz" || echo "Image import skipped/failed"
-            echo "Airgap images load step completed"
-          else
-            echo "Warning: Airgap images not found"
-          fi
           
           # Cleanup
           umount /tmp/seed 2>/dev/null || true

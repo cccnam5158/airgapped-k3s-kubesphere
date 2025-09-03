@@ -106,15 +106,18 @@ setup_wsl_environment() {
     # 결과를 Windows로 복사하는 함수 정의
     copy_back_to_windows() {
     if [[ -n "${ORIGINAL_OUT_DIR:-}" ]]; then
-    log_info "생성된 ISO 파일들을 Windows로 복사합니다..."
+    log_info "생성된 ISO 파일들을 Windows로 복사합니다... (Ubuntu 원본 ISO는 제외)"
     mkdir -p "$ORIGINAL_OUT_DIR"
-    
-    for iso_file in "$OUT_DIR"/*.iso; do
+
+    # seed-*.iso 만 복사 (Ubuntu 원본 ISO 제외)
+    shopt -s nullglob
+    for iso_file in "$OUT_DIR"/seed-*.iso; do
     if [[ -f "$iso_file" ]]; then
     cp "$iso_file" "$ORIGINAL_OUT_DIR/"
     log_success "$(basename "$iso_file")을 Windows로 복사했습니다"
     fi
     done
+    shopt -u nullglob
     fi
     }
     
