@@ -3,6 +3,8 @@ wsl/out/
 wsl/iso/
 wsl/registry/
 wsl/scripts/ops-packages/
+wsl/scripts/kube-prometheus-stack/image-archive
+wsl/scripts/kube-prometheus-stack/kube-prometheus-stack
 
 # Temporary files
 *.tmp

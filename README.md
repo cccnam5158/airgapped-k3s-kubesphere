@@ -14,22 +14,34 @@ Windows 10/11 환경에서 VMware Workstation Pro를 사용하여 완전히 오�
 
 ## 📚 목차
 
-- **핵심 안내**
-  - [프로젝트 개요](#-프로젝트-개요)
-  - [아키텍처](#-아키텍처)
-  - [실행 순서 요약](#-실행-순서-요약)
-  - [빠른 시작](#-빠른-시작)
-  - [사전 요구사항](#-사전-요구사항)
-- **사용 안내**
-  - [프로젝트 구조](#-프로젝트-구조)
-  - [접속 정보](#-접속-정보)
-  - [시간 동기화(중요)](#-시간-동기화중요)
-  - [구성 요소 버전](#-구성-요소-버전)
-- **트러블슈팅/개선**
-  - [문제 해결(트러블슈팅) 안내](#-문제-해결트러블슈팅-안내)
-  - [최근 변경사항](#-최근-변경사항)
-  - [참고자료](#-관련-자료)
-  - [라이선스](#-라이선스)
+### 🚀 시작하기
+- [프로젝트 개요](#-프로젝트-개요)
+- [아키텍처](#-아키텍처)
+- [실행 순서 요약](#-실행-순서-요약)
+- [빠른 시작](#-빠른-시작)
+- [사전 요구사항](#-사전-요구사항)
+
+### 📖 사용 가이드
+- [프로젝트 구조](#-프로젝트-구조)
+- [접속 정보](#-접속-정보)
+- [시간 동기화(중요)](#-시간-동기화중요)
+- [구성 요소 버전](#-구성-요소-버전)
+- [미러링된 이미지 목록](#-미러링된-이미지-목록)
+
+### 🔧 운영 및 관리
+- [WSL에서 kubectl로 VM 클러스터 접속하기](#wsl에서-kubectl로-vm-클러스터-접속하기)
+- [VM 내부 패키지 설치 상태 점검](#-vm-내부-패키지-설치-상태-점검)
+- [에어갭 환경 구성](#-에어갭-환경-구성)
+
+### ⚠️ 문제 해결
+- [문제 해결(트러블슈팅) 안내](#-문제-해결트러블슈팅-안내)
+- [주의사항](#️-주의사항)
+- [보안 및 안정성](#-보안-및-안정성)
+
+### 📝 참고 정보
+- [최근 변경사항](#-최근-변경사항)
+- [관련 자료](#-관련-자료)
+- [라이선스](#-라이선스)
 
 ## 🏗 아키텍처
 
@@ -123,11 +135,62 @@ airgapped-k3s-kubesphere/
 # WSL2 Ubuntu 실행
 wsl -d Ubuntu-22.04
 
-# 오프라인 준비 스크립트 실행
+# 오프라인 준비 스크립트 실행 (환경변수 자동 설정)
 cd wsl/scripts
 chmod +x 00_prep_offline_fixed.sh
 ./00_prep_offline_fixed.sh
 ```
+
+> **🆕 개선사항**: 이제 환경변수가 자동으로 설정되므로 별도 설정 없이 바로 실행 가능합니다. 스크립트가 Nexus3 비밀번호를 입력 요청합니다.
+
+### (선택) 외부(WSL) Nexus3 프라이빗 레지스트리 사용
+
+WSL에서 docker로 실행 중인 Nexus3를 프라이빗 레지스트리로 사용할 수 있습니다. **환경변수는 자동으로 설정되므로** 별도 설정 없이 바로 실행 가능합니다.
+
+#### 🚀 간단한 실행 방법 (권장)
+
+```bash
+# WSL 터미널에서 바로 실행
+cd wsl/scripts
+chmod +x 00_prep_offline_fixed.sh
+./00_prep_offline_fixed.sh
+```
+
+스크립트가 자동으로 다음을 수행합니다:
+- 환경변수 자동 설정 (기본값 사용)
+- Nexus3 비밀번호 입력 요청 (기본값: `nam0941!@#`)
+- 모든 설정 정보 출력
+
+#### 🔧 수동 환경변수 설정 (고급 사용자)
+
+기본값을 변경하고 싶은 경우에만 환경변수를 수동으로 설정하세요:
+
+```bash
+# WSL 터미널에서
+export USE_EXTERNAL_REGISTRY=true
+export EXTERNAL_REGISTRY_PUSH_HOST=localhost
+export EXTERNAL_REGISTRY_PUSH_PORT=5000
+export REGISTRY_USERNAME=admin
+export REGISTRY_PASSWORD='<password>'
+# VM이 접근할 Windows Host IP:Port (기본 192.168.6.1:5000)
+export REGISTRY_HOST_IP=192.168.6.1
+export REGISTRY_PORT=5000
+# 셀프사인 인증서 환경이면 true (권장), CA 배포 시 false
+export REGISTRY_TLS_INSECURE=true
+
+bash wsl/scripts/00_prep_offline_fixed.sh
+```
+
+```powershell
+# Windows(관리자)에서 포트 프록시 설정
+.\u0063ipts\setup-port-forwarding.ps1 -RegistryIP 192.168.6.1 -Port 5000
+```
+
+#### ✅ 검증 방법
+
+- WSL: `docker login localhost:5000` 성공, `curl -k https://localhost:5000/v2/` 200
+- VM: `curl -k https://192.168.6.1:5000/v2/` 200
+- k3s: 이미지 풀 오류 없이 파드가 Running
 
 ### 2.5단계: Windows 포트 포워딩 설정
 

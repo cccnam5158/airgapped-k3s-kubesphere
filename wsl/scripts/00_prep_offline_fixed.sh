@@ -34,10 +34,66 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$PROJECT_ROOT/out"
 
+# 환경변수 자동 설정 함수
+setup_environment() {
+    log_info "환경변수 자동 설정 중..."
+    
+    # 기본값 설정 (사용자가 이미 설정한 값이 있으면 유지)
+    export REGISTRY_HOST_IP="${REGISTRY_HOST_IP:-192.168.6.1}"
+    export REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+    export USE_EXTERNAL_REGISTRY="${USE_EXTERNAL_REGISTRY:-true}"
+    export EXTERNAL_REGISTRY_PUSH_HOST="${EXTERNAL_REGISTRY_PUSH_HOST:-localhost}"
+    export EXTERNAL_REGISTRY_PUSH_PORT="${EXTERNAL_REGISTRY_PUSH_PORT:-5000}"
+    export REGISTRY_USERNAME="${REGISTRY_USERNAME:-admin}"
+    export REGISTRY_TLS_INSECURE="${REGISTRY_TLS_INSECURE:-true}"
+    
+    # 비밀번호가 설정되지 않은 경우 사용자에게 입력 요청
+    if [[ -z "$REGISTRY_PASSWORD" ]]; then
+        log_warning "REGISTRY_PASSWORD가 설정되지 않았습니다."
+        echo -n "Nexus3 비밀번호를 입력하세요 (기본값: nam0941!@#): "
+        read -r input_password
+        export REGISTRY_PASSWORD="${input_password:-nam0941!@#}"
+    fi
+    
+    # 환경변수 정보 출력
+    log_info "설정된 환경변수:"
+    log_info "  REGISTRY_HOST_IP: $REGISTRY_HOST_IP"
+    log_info "  REGISTRY_PORT: $REGISTRY_PORT"
+    log_info "  USE_EXTERNAL_REGISTRY: $USE_EXTERNAL_REGISTRY"
+    log_info "  EXTERNAL_REGISTRY_PUSH_HOST: $EXTERNAL_REGISTRY_PUSH_HOST"
+    log_info "  EXTERNAL_REGISTRY_PUSH_PORT: $EXTERNAL_REGISTRY_PUSH_PORT"
+    log_info "  REGISTRY_USERNAME: $REGISTRY_USERNAME"
+    log_info "  REGISTRY_PASSWORD: [설정됨]"
+    log_info "  REGISTRY_TLS_INSECURE: $REGISTRY_TLS_INSECURE"
+}
+
 # Registry network configuration (used for TLS SANs and client access from VMs)
 # Default host IP is the Windows host-only IP that VMs reach; override via env if needed
 REGISTRY_HOST_IP="${REGISTRY_HOST_IP:-192.168.6.1}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+
+# External/private registry (e.g., Nexus3 running in WSL via docker run)
+# - When enabled, we DO NOT start local registry:2 nor generate local TLS certs
+# - Push endpoint is typically WSL localhost:5000
+# - VM pull endpoint remains ${REGISTRY_HOST_IP}:${REGISTRY_PORT} via Windows portproxy
+USE_EXTERNAL_REGISTRY="${USE_EXTERNAL_REGISTRY:-true}"
+EXTERNAL_REGISTRY_PUSH_HOST="${EXTERNAL_REGISTRY_PUSH_HOST:-localhost}"
+EXTERNAL_REGISTRY_PUSH_PORT="${EXTERNAL_REGISTRY_PUSH_PORT:-5000}"
+REGISTRY_USERNAME="${REGISTRY_USERNAME:-admin}"
+REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-}"
+
+# TLS verification for VMs pulling from registry
+# If your Nexus3 uses a self-signed certificate, keep this true (skip verification)
+# Otherwise set to false and distribute CA, then set ca_file in templates when needed
+REGISTRY_TLS_INSECURE="${REGISTRY_TLS_INSECURE:-true}"
+
+# Effective endpoints
+# - PUSH from WSL to registry
+REGISTRY_PUSH_HOST="$EXTERNAL_REGISTRY_PUSH_HOST"
+REGISTRY_PUSH_PORT="$EXTERNAL_REGISTRY_PUSH_PORT"
+# - PULL from VMs to Windows host (forwarded to WSL)
+REGISTRY_PULL_HOST="$REGISTRY_HOST_IP"
+REGISTRY_PULL_PORT="$REGISTRY_PORT"
 
 # 이미지 목록 파일 선택
 IMAGES_FILE="$PROJECT_ROOT/examples/images-fixed.txt"
@@ -101,6 +157,33 @@ install_packages() {
         docker.io
     
     log_success "패키지 설치 완료"
+}
+
+# External registry login and health check (when USE_EXTERNAL_REGISTRY=true)
+login_and_check_registry() {
+    if [[ "$USE_EXTERNAL_REGISTRY" == "true" ]]; then
+        if [[ -z "$REGISTRY_PASSWORD" ]]; then
+            log_error "외부 레지스트리 비밀번호가 비어있습니다. REGISTRY_PASSWORD 를 설정하세요."
+            exit 1
+        fi
+
+        local login_endpoint="${REGISTRY_PUSH_HOST}:${REGISTRY_PUSH_PORT}"
+        log_info "외부 레지스트리 로그인 중: ${login_endpoint} (username=${REGISTRY_USERNAME})"
+        echo "$REGISTRY_PASSWORD" | docker login "$login_endpoint" --username "$REGISTRY_USERNAME" --password-stdin
+
+        log_info "외부 레지스트리 상태 확인 중 (/v2/) ..."
+        # -k 사용: 셀프사인 인증서 환경 지원
+        if curl -fsSk "https://${login_endpoint}/v2/" > /dev/null 2>&1; then
+            log_success "외부 레지스트리 접근 가능"
+        else
+            log_error "외부 레지스트리에 접근할 수 없습니다: https://${login_endpoint}/v2/"
+            exit 1
+        fi
+    else
+        # Local legacy path
+        generate_certificates
+        start_registry
+    fi
 }
 
 # TLS 인증서 생성
@@ -174,7 +257,8 @@ start_registry() {
 
 # 이미지 미러링
 mirror_images() {
-    log_info "이미지 미러링 시작: $IMAGES_FILE -> localhost:${REGISTRY_PORT}"
+    local push_endpoint="${REGISTRY_PUSH_HOST}:${REGISTRY_PUSH_PORT}"
+    log_info "이미지 미러링 시작: $IMAGES_FILE -> ${push_endpoint}"
     
     local total_images=$(wc -l < "$IMAGES_FILE")
     local current=0
@@ -190,7 +274,7 @@ mirror_images() {
         target_image=$(echo "$target_image" | tr -d '\r')
         
         current=$((current + 1))
-        log_info "[$current/$total_images] 미러링: $source_image -> localhost:${REGISTRY_PORT}/$target_image"
+        log_info "[$current/$total_images] 미러링: $source_image -> ${push_endpoint}/$target_image"
         
         # 이미지 pull 및 push (3회 재시도)
         local retry_count=0
@@ -198,8 +282,8 @@ mirror_images() {
         
         while [ $retry_count -lt 3 ] && [ "$success" = false ]; do
             if docker pull "$source_image" && \
-               docker tag "$source_image" "localhost:${REGISTRY_PORT}/$target_image" && \
-               docker push "localhost:${REGISTRY_PORT}/$target_image"; then
+               docker tag "$source_image" "${push_endpoint}/$target_image" && \
+               docker push "${push_endpoint}/$target_image"; then
                 success=true
             else
                 retry_count=$((retry_count + 1))
@@ -269,47 +353,93 @@ download_airgap_images() {
 
 # registries.yaml 생성
 generate_registries_config() {
-    log_info "registries.yaml 설정 생성 중... (VM → https://${REGISTRY_HOST_IP}:${REGISTRY_PORT})"
+    log_info "registries.yaml 설정 생성 중... (VM → https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT})"
     
-    cat > "$OUTPUT_DIR/registries.yaml" << EOF
+    # 인증 정보가 있는 경우와 없는 경우를 구분하여 생성
+    if [[ "$USE_EXTERNAL_REGISTRY" == "true" && -n "$REGISTRY_USERNAME" && -n "$REGISTRY_PASSWORD" ]]; then
+        log_info "인증 정보를 포함한 registries.yaml 생성 (username=${REGISTRY_USERNAME})"
+        cat > "$OUTPUT_DIR/registries.yaml" << EOF
 mirrors:
-  "${REGISTRY_HOST_IP}:${REGISTRY_PORT}":
+  "${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "registry.k8s.io":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "docker.io":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "quay.io":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "gcr.io":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "kubesphere":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "prom":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "grafana":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "bitnami":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
   "rancher":
     endpoint:
-      - "https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
 
 configs:
-  "${REGISTRY_HOST_IP}:${REGISTRY_PORT}":
+  "${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}":
     tls:
-      ca_file: /usr/local/share/ca-certificates/airgap-registry-ca.crt
-      insecure_skip_verify: false
+      insecure_skip_verify: ${REGISTRY_TLS_INSECURE}
+    auth:
+      username: ${REGISTRY_USERNAME}
+      password: ${REGISTRY_PASSWORD}
 EOF
+    else
+        log_info "인증 정보 없이 registries.yaml 생성 (공개 레지스트리 또는 인증 불필요)"
+        cat > "$OUTPUT_DIR/registries.yaml" << EOF
+mirrors:
+  "${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "registry.k8s.io":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "docker.io":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "quay.io":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "gcr.io":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "kubesphere":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "prom":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "grafana":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "bitnami":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+  "rancher":
+    endpoint:
+      - "https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
+
+configs:
+  "${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}":
+    tls:
+      insecure_skip_verify: ${REGISTRY_TLS_INSECURE}
+EOF
+    fi
     
     log_success "registries.yaml 설정 생성 완료"
 }
@@ -332,10 +462,12 @@ generate_ssh_keys() {
 main() {
     log_info "KubeSphere Airgap Lab 오프라인 준비 시작"
     
+    # 환경변수 자동 설정
+    setup_environment
+    
     check_prerequisites
     install_packages
-    generate_certificates
-    start_registry
+    login_and_check_registry
     mirror_images
     download_k3s
     download_airgap_images
@@ -344,8 +476,8 @@ main() {
     
     log_success "오프라인 준비 완료"
     log_info "출력 디렉토리: $OUTPUT_DIR"
-    log_info "레지스트리 URL (WSL 내부): https://localhost:${REGISTRY_PORT}"
-    log_info "레지스트리 URL (VM에서 접근): https://${REGISTRY_HOST_IP}:${REGISTRY_PORT}"
+    log_info "푸시 엔드포인트 (WSL 내부): https://${REGISTRY_PUSH_HOST}:${REGISTRY_PUSH_PORT}"
+    log_info "풀 엔드포인트 (VM에서 접근): https://${REGISTRY_PULL_HOST}:${REGISTRY_PULL_PORT}"
     log_info "SSH 개인키: $OUTPUT_DIR/ssh/id_rsa"
 }
 
